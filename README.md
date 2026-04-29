@@ -10,7 +10,20 @@ It helps you validate, enforce, and maintain the desired state and best practice
 
 ## Getting Started
 
-*(Instructions for installation, setup, and basic usage will be added here.)*
+### Prerequisites
+- Go 1.26 or later
+- Access to a Kubernetes v1.20+ cluster (e.g., kind, minikube)
+- kubectl
+
+### Installation
+
+*(Standard `make deploy` instructions will go here once the Makefile is setup).*
+
+## Project Structure
+
+- `cmd/main.go`: Entry point for the Operator manager.
+- `api/`: Custom Resource Definitions (CRDs) for configuring policies.
+- `internal/controller/`: Reconcile loops to monitor and enforce configuration correctness.
 
 ## Contributing
 
