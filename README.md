@@ -1,7 +1,7 @@
 # KubeOrthos
 
-KubeOrthos is a tool designed to ensure cluster-wide configuration correctness for Kubernetes. 
-It helps you validate, enforce, and maintain the desired state and best practices across your entire cluster configuration.
+KubeOrthos is a Kubernetes Operator designed to ensure cluster-wide configuration correctness. 
+It helps you validate, enforce, and maintain the desired state and best practices across your entire cluster configuration using Custom Resource Definitions (CRDs).
 
 ## Features
 - **Cluster-Wide Validation**: Analyzes your Kubernetes cluster to identify misconfigurations and deviations from established policies.
