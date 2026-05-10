@@ -49,6 +49,9 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments. CLI injects code at these m
 ### Keep Project Structure
 Do not move files around. The CLI expects files in specific locations.
 
+### Keep Samples Updated
+Whenever you add or modify fields in the CRD `Spec` (e.g., `ClusterRule`), you MUST immediately update the corresponding sample YAML file in `config/samples/` to include the new structure and valid example data.
+
 ### Always Use CLI Commands
 Always use `kubebuilder create api` and `kubebuilder create webhook` to scaffold. Do NOT create files manually.
 

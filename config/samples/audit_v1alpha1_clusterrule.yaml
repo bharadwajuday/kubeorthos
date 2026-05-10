@@ -6,4 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: clusterrule-sample
 spec:
-  # TODO(user): Add fields here
+  action: Audit
+  expectedNodeConfig:
+    kubeletVersion: v1.34.0
+    containerRuntime: containerd://1.7.29
