@@ -20,7 +20,7 @@ The application is structured following standard Go Kubernetes Operator patterns
 
 ### 3. `internal/controller`
 - **Responsibility**: The Reconcile loops.
-- **Key Concepts**: Watches the CRDs and standard Kubernetes resources. The Reconciler evaluates the actual state of the cluster against the desired policies defined in the CRDs, performing the correctness checks.
+- **Key Concepts**: Watches the CRDs and standard Kubernetes resources (e.g., `Node` objects). The `ClusterRuleReconciler` specifically watches `ClusterRule` objects and maps events from `Node` changes back to the `ClusterRule`s. It evaluates the nodes' Kubelet and Container Runtime versions against the configurations specified in the CRD and updates the CRD's status with compliance conditions.
 
 ### 4. `internal/validator`
 - **Responsibility**: The core rule engine.
@@ -32,10 +32,12 @@ The application is structured following standard Go Kubernetes Operator patterns
 
 ## Flow of Execution
 
-1. **Initialization**: The Operator pod starts, and the Manager begins watching registered resources.
-2. **Reconciliation**: When a KubeOrthos CRD is created/updated, or watched resources change, the Reconciler is triggered.
-3. **Validation**: The Reconciler delegates to the `validator` to check the resources against the policy.
-4. **Status Update**: The Operator updates the `Status` subresource of the CRD to report violations or compliance, and emits Kubernetes Events.
+1. **Initialization**: The Operator pod starts, and the Manager begins watching registered resources. The `ClusterRuleReconciler` is registered to watch `ClusterRule` and `Node` kinds.
+2. **Reconciliation Trigger**: When a `ClusterRule` is created/updated, or any watched `Node` changes, the Reconciler is triggered (via a Map function mapping Node events to all ClusterRules).
+3. **Evaluation**: The Reconciler fetches all cluster `Node`s and evaluates their specifications (e.g., Kubelet version, Container Runtime) against the `ExpectedNodeConfig` specified in the `ClusterRule`.
+4. **Status & Event Update**: 
+   - If deviations are found, the Reconciler logs the non-compliance and emits a `Warning` Kubernetes Event on the `ClusterRule` object.
+   - The Operator updates the `Status` subresource (specifically the `Conditions` array) of the `ClusterRule` to report the overall compliance state (True if compliant, False if deviations exist).
 
 ## Development Principles
 

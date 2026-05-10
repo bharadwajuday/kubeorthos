@@ -1,0 +1,9 @@
+apiVersion: audit.kubeorthos.io/v1alpha1
+kind: ClusterRule
+metadata:
+  labels:
+    app.kubernetes.io/name: kubeorthos
+    app.kubernetes.io/managed-by: kustomize
+  name: clusterrule-sample
+spec:
+  # TODO(user): Add fields here

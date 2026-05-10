@@ -8,4 +8,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: kubeorthos
 repo: kubeorthos
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: kubeorthos.io
+  group: audit
+  kind: ClusterRule
+  path: kubeorthos/api/v1alpha1
+  version: v1alpha1
 version: "3"
