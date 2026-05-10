@@ -17,7 +17,38 @@ It helps you validate, enforce, and maintain the desired state and best practice
 
 ### Installation
 
-*(Standard `make deploy` instructions will go here once the Makefile is setup).*
+To run the operator locally against your configured Kubernetes cluster:
+```bash
+# 1. Install the Custom Resource Definitions (CRDs)
+make install
+
+# 2. Run the operator locally
+make run
+```
+
+### Usage: ClusterRule
+
+KubeOrthos allows you to define a `ClusterRule` to audit your nodes and ensure they are running expected configurations like specific Kubelet and Container Runtime versions.
+
+1. Create a `ClusterRule` YAML file (e.g., `baseline.yaml`):
+```yaml
+apiVersion: audit.kubeorthos.io/v1alpha1
+kind: ClusterRule
+metadata:
+  name: baseline-v1-34
+spec:
+  action: Audit
+  expectedNodeConfig:
+    kubeletVersion: v1.34.0
+    containerRuntime: containerd://1.7.29
+```
+
+2. Apply the rule to your cluster:
+```bash
+kubectl apply -f baseline.yaml
+```
+
+3. The operator will audit your nodes and emit `Warning` events and update the `Compliant` status condition on the `ClusterRule` if any deviations are found.
 
 ## Project Structure
 
