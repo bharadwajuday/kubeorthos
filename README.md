@@ -56,6 +56,10 @@ kubectl apply -f baseline.yaml
 - `api/`: Custom Resource Definitions (CRDs) for configuring policies.
 - `internal/controller/`: Reconcile loops to monitor and enforce configuration correctness.
 
+## AI Skills Files
+
+This project utilizes specific "Skill Files" (e.g., `SKILL_UPDATE_CRD.md` and `AGENT.md`) that contain predefined rules and workflows for AI coding assistants to follow. When using AI agents on this repository, you can instruct them to read these files for context on best practices and required steps.
+
 ## Contributing
 
 We welcome contributions! Please see the contributing guidelines (coming soon) for more information on how to get involved.
