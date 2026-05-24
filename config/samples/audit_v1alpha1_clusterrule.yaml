@@ -24,6 +24,6 @@ spec:
     - type: DiskPressure
       status: "False"
   minimumResources:
-    cpu: "20"
+    cpu: "8"
     memory: "2Gi"
     storage: "10Gi"
