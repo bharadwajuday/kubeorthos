@@ -38,9 +38,15 @@ metadata:
   name: baseline-v1-34
 spec:
   action: Audit
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/os: linux
   expectedNodeConfig:
     kubeletVersion: v1.34.0
     containerRuntime: containerd://1.7.29
+    kernelVersion: 5.15.0-101-generic
+    osImage: Ubuntu 22.04 LTS
+    architecture: amd64
 ```
 
 2. Apply the rule to your cluster:
@@ -48,7 +54,7 @@ spec:
 kubectl apply -f baseline.yaml
 ```
 
-3. The operator will audit your nodes and emit `Warning` events and update the `Compliant` status condition on the `ClusterRule` if any deviations are found.
+3. The operator will audit only the nodes matching the label selector (or all nodes if `nodeSelector` is omitted). It will validate Kubelet, Container Runtime, Kernel version, OS image, and architecture. If any deviations are found, it will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
 
 ## Project Structure
 

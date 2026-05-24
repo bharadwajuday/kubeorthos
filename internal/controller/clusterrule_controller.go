@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -71,9 +72,24 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// List all Nodes
+	log.Info("Reconciling ClusterRule", "name", rule.Name, "action", rule.Spec.Action)
+
+	// List Nodes matching the selector
 	var nodeList corev1.NodeList
-	if err := r.List(ctx, &nodeList); err != nil {
+	var listOpts []client.ListOption
+
+	if rule.Spec.NodeSelector != nil {
+		var selector labels.Selector
+		var err error
+		selector, err = metav1.LabelSelectorAsSelector(rule.Spec.NodeSelector)
+		if err != nil {
+			log.Error(err, "unable to parse NodeSelector")
+			return ctrl.Result{}, err
+		}
+		listOpts = append(listOpts, client.MatchingLabelsSelector{Selector: selector})
+	}
+
+	if err := r.List(ctx, &nodeList, listOpts...); err != nil {
 		log.Error(err, "unable to list Nodes")
 		return ctrl.Result{}, err
 	}
@@ -95,6 +111,24 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			mismatchMsg += fmt.Sprintf("ContainerRuntime mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.ContainerRuntime, node.Status.NodeInfo.ContainerRuntimeVersion)
 		}
 
+		// Check KernelVersion
+		if rule.Spec.ExpectedNodeConfig.KernelVersion != "" && node.Status.NodeInfo.KernelVersion != rule.Spec.ExpectedNodeConfig.KernelVersion {
+			isCompliant = false
+			mismatchMsg += fmt.Sprintf("KernelVersion mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.KernelVersion, node.Status.NodeInfo.KernelVersion)
+		}
+
+		// Check OSImage
+		if rule.Spec.ExpectedNodeConfig.OSImage != "" && node.Status.NodeInfo.OSImage != rule.Spec.ExpectedNodeConfig.OSImage {
+			isCompliant = false
+			mismatchMsg += fmt.Sprintf("OSImage mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.OSImage, node.Status.NodeInfo.OSImage)
+		}
+
+		// Check Architecture
+		if rule.Spec.ExpectedNodeConfig.Architecture != "" && node.Status.NodeInfo.Architecture != rule.Spec.ExpectedNodeConfig.Architecture {
+			isCompliant = false
+			mismatchMsg += fmt.Sprintf("Architecture mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.Architecture, node.Status.NodeInfo.Architecture)
+		}
+
 		if !isCompliant {
 			nonCompliantNodes = append(nonCompliantNodes, node.Name)
 			log.Info("Node is non-compliant", "node", node.Name, "mismatches", mismatchMsg)
@@ -113,7 +147,10 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		ObservedGeneration: rule.Generation,
 	}
 
-	if len(nonCompliantNodes) > 0 {
+	if rule.Spec.NodeSelector != nil && len(nodeList.Items) == 0 {
+		condition.Reason = "NoMatchingNodes"
+		condition.Message = "No nodes matched the specified node selector"
+	} else if len(nonCompliantNodes) > 0 {
 		condition.Status = metav1.ConditionFalse
 		condition.Reason = "NodesNonCompliant"
 		condition.Message = fmt.Sprintf("%d node(s) are non-compliant", len(nonCompliantNodes))
@@ -124,6 +161,8 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		log.Error(err, "unable to update ClusterRule status")
 		return ctrl.Result{}, err
 	}
+
+	log.Info("Reconciled ClusterRule successfully", "name", rule.Name, "compliant", condition.Status == metav1.ConditionTrue, "reason", condition.Reason)
 
 	return ctrl.Result{}, nil
 }

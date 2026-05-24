@@ -32,6 +32,18 @@ type ExpectedNodeConfig struct {
 	// ContainerRuntime specifies the expected container runtime string
 	// +optional
 	ContainerRuntime string `json:"containerRuntime,omitempty"`
+
+	// KernelVersion specifies the expected kernel version of the node
+	// +optional
+	KernelVersion string `json:"kernelVersion,omitempty"`
+
+	// OSImage specifies the expected OS image of the node
+	// +optional
+	OSImage string `json:"osImage,omitempty"`
+
+	// Architecture specifies the expected CPU architecture of the node
+	// +optional
+	Architecture string `json:"architecture,omitempty"`
 }
 
 // ActionType defines the type of action to take when a rule is evaluated
@@ -52,6 +64,11 @@ type ClusterRuleSpec struct {
 	// ExpectedNodeConfig specifies the expected configuration for the nodes
 	// +kubebuilder:validation:Required
 	ExpectedNodeConfig ExpectedNodeConfig `json:"expectedNodeConfig"`
+
+	// NodeSelector specifies a label selector to target specific nodes.
+	// If empty, the rule applies to all nodes.
+	// +optional
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
 }
 
 // ClusterRuleStatus defines the observed state of ClusterRule.
