@@ -547,5 +547,75 @@ var _ = Describe("ClusterRule Controller", func() {
 			Expect(workerCompliantQuarantined.Spec.Unschedulable).To(BeFalse())
 			Expect(workerCompliantQuarantined.Annotations).NotTo(HaveKey("policy.kubeorthos.io/quarantined"))
 		})
+
+		It("should uncordon worker nodes when a rule action transitions from Enforce to Audit", func() {
+			transitionRuleName := "test-transition-rule"
+
+			// 1. Start with ActionEnforce
+			rule := &auditv1alpha1.ClusterRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      transitionRuleName,
+					Namespace: "default",
+				},
+				Spec: auditv1alpha1.ClusterRuleSpec{
+					Action: auditv1alpha1.ActionEnforce,
+					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
+						KubeletVersion: "v1.34.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
+
+			// Previously quarantined worker node
+			quarantinedWorker := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "quarantined-worker-transition",
+					Annotations: map[string]string{
+						"policy.kubeorthos.io/quarantined": "true",
+					},
+				},
+				Spec: corev1.NodeSpec{
+					Unschedulable: true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, quarantinedWorker)).To(Succeed())
+			quarantinedWorker.Status = corev1.NodeStatus{
+				NodeInfo: corev1.NodeSystemInfo{
+					KubeletVersion: "v1.15.0-outdated", // still non-compliant
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, quarantinedWorker)).To(Succeed())
+
+			controllerReconciler := &ClusterRuleReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			// Reconcile once in Enforce: Node should remain quarantined since it's still non-compliant
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: transitionRuleName, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "quarantined-worker-transition"}, quarantinedWorker)).To(Succeed())
+			Expect(quarantinedWorker.Spec.Unschedulable).To(BeTrue())
+			Expect(quarantinedWorker.Annotations).To(HaveKeyWithValue("policy.kubeorthos.io/quarantined", "true"))
+
+			// 2. Change rule Action to Audit
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: transitionRuleName, Namespace: "default"}, rule)).To(Succeed())
+			rule.Spec.Action = auditv1alpha1.ActionAudit
+			Expect(k8sClient.Update(ctx, rule)).To(Succeed())
+
+			// Reconcile again: The node should now be actively uncordoned and quarantine annotation removed
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: transitionRuleName, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "quarantined-worker-transition"}, quarantinedWorker)).To(Succeed())
+			Expect(quarantinedWorker.Spec.Unschedulable).To(BeFalse())
+			Expect(quarantinedWorker.Annotations).NotTo(HaveKey("policy.kubeorthos.io/quarantined"))
+		})
 	})
 })

@@ -221,6 +221,17 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 					}
 				}
 			}
+		} else {
+			// Rule is in Audit mode (or not Enforce) - lift any existing quarantines applied by KubeOrthos
+			if node.Annotations != nil {
+				if _, isQuarantined := node.Annotations["policy.kubeorthos.io/quarantined"]; isQuarantined {
+					node.Spec.Unschedulable = false
+					delete(node.Annotations, "policy.kubeorthos.io/quarantined")
+					nodeUpdated = true
+					r.Recorder.Eventf(&rule, nil, corev1.EventTypeNormal, "UncordonedNode", "Enforcement", "Transitioned to Audit: Successfully uncordoned worker node %s", node.Name)
+					log.Info("Transitioned to Audit: Uncordoned worker node", "node", node.Name)
+				}
+			}
 		}
 
 		// Active Compliance & Custom Labeling
