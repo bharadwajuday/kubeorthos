@@ -11,8 +11,19 @@ spec:
     matchLabels:
       kubernetes.io/os: linux
   expectedNodeConfig:
-    kubeletVersion: v1.34.3
-    containerRuntime: containerd://2.2.0
-    kernelVersion: 6.12.76-linuxkit
-    osImage: Debian GNU/Linux 12 (bookworm)
-    architecture: arm64
+    kubeletVersion: v1.34.0
+    containerRuntime: containerd://1.7.29
+    kernelVersion: 5.15.0-101-generic
+    osImage: Ubuntu 22.04 LTS
+    architecture: amd64
+  expectedConditions:
+    - type: Ready
+      status: "True"
+    - type: MemoryPressure
+      status: "False"
+    - type: DiskPressure
+      status: "False"
+  minimumResources:
+    cpu: "2"
+    memory: "2Gi"
+    storage: "10Gi"

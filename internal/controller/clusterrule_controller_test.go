@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -246,6 +247,131 @@ var _ = Describe("ClusterRule Controller", func() {
 			Expect(cond.Reason).To(Equal("NodesNonCompliant"))
 			// Only 1 node (worker-node-2) should be reported non-compliant. master-node is ignored.
 			Expect(cond.Message).To(Equal("1 node(s) are non-compliant"))
+		})
+
+		It("should audit and validate health conditions and minimum resources", func() {
+			cpuQty := resource.MustParse("4")
+			memQty := resource.MustParse("16Gi")
+
+			rule := &auditv1alpha1.ClusterRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: auditv1alpha1.ClusterRuleSpec{
+					Action: auditv1alpha1.ActionAudit,
+					ExpectedConditions: []auditv1alpha1.NodeConditionRequirement{
+						{
+							Type:   corev1.NodeReady,
+							Status: corev1.ConditionTrue,
+						},
+						{
+							Type:   corev1.NodeMemoryPressure,
+							Status: corev1.ConditionFalse,
+						},
+					},
+					MinimumResources: &auditv1alpha1.MinResourceRequirements{
+						CPU:    &cpuQty,
+						Memory: &memQty,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
+
+			// Node 1: Fully compliant node
+			compliantNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "compliant-node",
+				},
+			}
+			Expect(k8sClient.Create(ctx, compliantNode)).To(Succeed())
+			compliantNode.Status = corev1.NodeStatus{
+				Conditions: []corev1.NodeCondition{
+					{
+						Type:   corev1.NodeReady,
+						Status: corev1.ConditionTrue,
+					},
+					{
+						Type:   corev1.NodeMemoryPressure,
+						Status: corev1.ConditionFalse,
+					},
+				},
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("8"),
+					corev1.ResourceMemory: resource.MustParse("32Gi"),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, compliantNode)).To(Succeed())
+
+			// Node 2: Non-compliant node due to MemoryPressure condition mismatch
+			pressureNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pressure-node",
+				},
+			}
+			Expect(k8sClient.Create(ctx, pressureNode)).To(Succeed())
+			pressureNode.Status = corev1.NodeStatus{
+				Conditions: []corev1.NodeCondition{
+					{
+						Type:   corev1.NodeReady,
+						Status: corev1.ConditionTrue,
+					},
+					{
+						Type:   corev1.NodeMemoryPressure,
+						Status: corev1.ConditionTrue, // Mismatch!
+					},
+				},
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("8"),
+					corev1.ResourceMemory: resource.MustParse("32Gi"),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, pressureNode)).To(Succeed())
+
+			// Node 3: Non-compliant node due to insufficient CPU
+			lowCpuNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "low-cpu-node",
+				},
+			}
+			Expect(k8sClient.Create(ctx, lowCpuNode)).To(Succeed())
+			lowCpuNode.Status = corev1.NodeStatus{
+				Conditions: []corev1.NodeCondition{
+					{
+						Type:   corev1.NodeReady,
+						Status: corev1.ConditionTrue,
+					},
+					{
+						Type:   corev1.NodeMemoryPressure,
+						Status: corev1.ConditionFalse,
+					},
+				},
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"), // Mismatch!
+					corev1.ResourceMemory: resource.MustParse("32Gi"),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, lowCpuNode)).To(Succeed())
+
+			controllerReconciler := &ClusterRuleReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Fetch the rule and check status
+			Expect(k8sClient.Get(ctx, typeNamespacedName, rule)).To(Succeed())
+			cond := meta.FindStatusCondition(rule.Status.Conditions, "Compliant")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("NodesNonCompliant"))
+			// 2 nodes (pressure-node, low-cpu-node) should be non-compliant
+			Expect(cond.Message).To(Equal("2 node(s) are non-compliant"))
 		})
 	})
 })

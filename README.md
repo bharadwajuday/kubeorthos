@@ -47,6 +47,15 @@ spec:
     kernelVersion: 5.15.0-101-generic
     osImage: Ubuntu 22.04 LTS
     architecture: amd64
+  expectedConditions:
+    - type: Ready
+      status: "True"
+    - type: MemoryPressure
+      status: "False"
+  minimumResources:
+    cpu: "2"
+    memory: "2Gi"
+    storage: "10Gi"
 ```
 
 2. Apply the rule to your cluster:
@@ -54,7 +63,7 @@ spec:
 kubectl apply -f baseline.yaml
 ```
 
-3. The operator will audit only the nodes matching the label selector (or all nodes if `nodeSelector` is omitted). It will validate Kubelet, Container Runtime, Kernel version, OS image, and architecture. If any deviations are found, it will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
+3. The operator will audit only the nodes matching the label selector (or all nodes if `nodeSelector` is omitted). It will validate Kubelet, Container Runtime, Kernel version, OS image, architecture, health status conditions (e.g., MemoryPressure/DiskPressure), and hardware capacities (CPU, Memory, Storage). If any deviations are found, it will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
 
 ## Project Structure
 

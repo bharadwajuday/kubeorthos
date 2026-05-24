@@ -129,6 +129,50 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			mismatchMsg += fmt.Sprintf("Architecture mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.Architecture, node.Status.NodeInfo.Architecture)
 		}
 
+		// Check ExpectedConditions
+		for _, reqCond := range rule.Spec.ExpectedConditions {
+			var found bool
+			for _, nodeCond := range node.Status.Conditions {
+				if nodeCond.Type == reqCond.Type {
+					found = true
+					if nodeCond.Status != reqCond.Status {
+						isCompliant = false
+						mismatchMsg += fmt.Sprintf("Node Condition %s is %s, expected %s. ", reqCond.Type, nodeCond.Status, reqCond.Status)
+					}
+					break
+				}
+			}
+			if !found {
+				isCompliant = false
+				mismatchMsg += fmt.Sprintf("Node Condition %s is missing, expected %s. ", reqCond.Type, reqCond.Status)
+			}
+		}
+
+		// Check MinimumResources
+		if rule.Spec.MinimumResources != nil {
+			if rule.Spec.MinimumResources.CPU != nil {
+				actualCPU := node.Status.Allocatable[corev1.ResourceCPU]
+				if actualCPU.Cmp(*rule.Spec.MinimumResources.CPU) < 0 {
+					isCompliant = false
+					mismatchMsg += fmt.Sprintf("Allocatable CPU is insufficient: expected %s, got %s. ", rule.Spec.MinimumResources.CPU.String(), actualCPU.String())
+				}
+			}
+			if rule.Spec.MinimumResources.Memory != nil {
+				actualMemory := node.Status.Allocatable[corev1.ResourceMemory]
+				if actualMemory.Cmp(*rule.Spec.MinimumResources.Memory) < 0 {
+					isCompliant = false
+					mismatchMsg += fmt.Sprintf("Allocatable Memory is insufficient: expected %s, got %s. ", rule.Spec.MinimumResources.Memory.String(), actualMemory.String())
+				}
+			}
+			if rule.Spec.MinimumResources.Storage != nil {
+				actualStorage := node.Status.Allocatable[corev1.ResourceEphemeralStorage]
+				if actualStorage.Cmp(*rule.Spec.MinimumResources.Storage) < 0 {
+					isCompliant = false
+					mismatchMsg += fmt.Sprintf("Allocatable Ephemeral Storage is insufficient: expected %s, got %s. ", rule.Spec.MinimumResources.Storage.String(), actualStorage.String())
+				}
+			}
+		}
+
 		if !isCompliant {
 			nonCompliantNodes = append(nonCompliantNodes, node.Name)
 			log.Info("Node is non-compliant", "node", node.Name, "mismatches", mismatchMsg)

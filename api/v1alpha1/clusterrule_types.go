@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -55,6 +57,33 @@ const (
 	ActionEnforce ActionType = "Enforce"
 )
 
+// NodeConditionRequirement defines the expected state of a Node condition
+type NodeConditionRequirement struct {
+	// Type specifies the node condition type (e.g. Ready, MemoryPressure, DiskPressure, PIDPressure)
+	// +kubebuilder:validation:Required
+	Type corev1.NodeConditionType `json:"type"`
+
+	// Status specifies the expected status of the condition (True, False, Unknown)
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=True;False;Unknown
+	Status corev1.ConditionStatus `json:"status"`
+}
+
+// MinResourceRequirements specifies the minimum hardware capacity expected on the nodes
+type MinResourceRequirements struct {
+	// CPU specifies the minimum allocatable CPU capacity (e.g. "4", "4000m")
+	// +optional
+	CPU *resource.Quantity `json:"cpu,omitempty"`
+
+	// Memory specifies the minimum allocatable memory capacity (e.g. "16Gi")
+	// +optional
+	Memory *resource.Quantity `json:"memory,omitempty"`
+
+	// Storage specifies the minimum allocatable ephemeral storage capacity (e.g. "100Gi")
+	// +optional
+	Storage *resource.Quantity `json:"storage,omitempty"`
+}
+
 // ClusterRuleSpec defines the desired state of ClusterRule
 type ClusterRuleSpec struct {
 	// Action specifies what to do when a node does not match the expected configuration
@@ -69,6 +98,14 @@ type ClusterRuleSpec struct {
 	// If empty, the rule applies to all nodes.
 	// +optional
 	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
+
+	// ExpectedConditions specifies the required state of node status conditions.
+	// +optional
+	ExpectedConditions []NodeConditionRequirement `json:"expectedConditions,omitempty"`
+
+	// MinimumResources specifies the minimum hardware capacity expected on matching nodes.
+	// +optional
+	MinimumResources *MinResourceRequirements `json:"minimumResources,omitempty"`
 }
 
 // ClusterRuleStatus defines the observed state of ClusterRule.

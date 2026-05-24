@@ -46,6 +46,30 @@ spec:
                 - Audit
                 - Enforce
                 type: string
+              expectedConditions:
+                description: ExpectedConditions specifies the required state of node
+                  status conditions.
+                items:
+                  description: NodeConditionRequirement defines the expected state
+                    of a Node condition
+                  properties:
+                    status:
+                      description: Status specifies the expected status of the condition
+                        (True, False, Unknown)
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: Type specifies the node condition type (e.g. Ready,
+                        MemoryPressure, DiskPressure, PIDPressure)
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
               expectedNodeConfig:
                 description: ExpectedNodeConfig specifies the expected configuration
                   for the nodes
@@ -69,6 +93,35 @@ spec:
                   osImage:
                     description: OSImage specifies the expected OS image of the node
                     type: string
+                type: object
+              minimumResources:
+                description: MinimumResources specifies the minimum hardware capacity
+                  expected on matching nodes.
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: CPU specifies the minimum allocatable CPU capacity
+                      (e.g. "4", "4000m")
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Memory specifies the minimum allocatable memory capacity
+                      (e.g. "16Gi")
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storage:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Storage specifies the minimum allocatable ephemeral
+                      storage capacity (e.g. "100Gi")
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
                 type: object
               nodeSelector:
                 description: |-
