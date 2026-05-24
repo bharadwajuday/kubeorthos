@@ -57,6 +57,12 @@ spec:
     cpu: "2"
     memory: "2Gi"
     storage: "10Gi"
+  complianceLabel:
+    key: "policy.kubeorthos.io/compliant"
+    value: "true"
+  customLabels:
+    environment: "production"
+    tier: "frontend"
 ```
 
 2. Apply the rule to your cluster:
@@ -64,7 +70,14 @@ spec:
 kubectl apply -f baseline.yaml
 ```
 
-3. The operator will audit only the nodes matching the label selector (or all nodes if `nodeSelector` is omitted). It will validate Kubelet, Container Runtime, Kernel version, OS image, architecture, health status conditions (e.g., MemoryPressure/DiskPressure), and hardware capacities (CPU, Memory, Storage). If any deviations are found, it will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
+3. The operator will audit only the nodes matching the label selector (or all nodes if `nodeSelector` is omitted). It will validate Kubelet, Container Runtime, Kernel version, OS image, architecture, health status conditions (e.g., MemoryPressure/DiskPressure), and hardware capacities (CPU, Memory, Storage). If `complianceLabel` or `customLabels` are defined in the CRD, it will automatically apply them to compliant targeted nodes and actively remove them from non-compliant targeted nodes.
+
+4. **Active Enforcement (Cordoning)**: If `action` is set to `Enforce`, the operator actively quarantines non-compliant targeted nodes:
+   - **Worker Nodes**: Actively cordoned (`Unschedulable = true`) and annotated with `policy.kubeorthos.io/quarantined: "true"`.
+   - **Control Plane Nodes**: Automatically excluded from active cordoning to protect cluster stability.
+   - **Remediation**: Once a cordoned node becomes compliant, the operator automatically uncordons it and removes the quarantine annotation.
+
+If any deviations are found, the operator will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
 
 ## Project Structure
 

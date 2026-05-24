@@ -20,7 +20,7 @@ The application is structured following standard Go Kubernetes Operator patterns
 
 ### 3. `internal/controller`
 - **Responsibility**: The Reconcile loops.
-- **Key Concepts**: Watches the CRDs and standard Kubernetes resources (e.g., `Node` objects). The `ClusterRuleReconciler` specifically watches `ClusterRule` objects and maps events from `Node` changes back to the `ClusterRule`s. It filters target nodes using `nodeSelector` and evaluates their specifications (Kubelet, Container Runtime, Kernel, OS, CPU Architecture), health status conditions (e.g., `MemoryPressure`), and allocatable hardware resource capacities against the configurations specified in the CRD and updates the CRD's status with compliance conditions.
+- **Key Concepts**: Watches the CRDs and standard Kubernetes resources (e.g., `Node` objects). The `ClusterRuleReconciler` specifically watches `ClusterRule` objects and maps events from `Node` changes back to the `ClusterRule`s. It filters target nodes using `nodeSelector` and evaluates their specifications (Kubelet, Container Runtime, Kernel, OS, CPU Architecture), health status conditions (e.g., `MemoryPressure`), and allocatable hardware resource capacities against the configurations specified in the CRD. If `complianceLabel` is defined, it actively applies the label to compliant nodes and removes it from non-compliant nodes, updating the CRD's status with compliance conditions.
 
 ### 4. `internal/validator`
 - **Responsibility**: The core rule engine.
@@ -35,9 +35,11 @@ The application is structured following standard Go Kubernetes Operator patterns
 1. **Initialization**: The Operator pod starts, and the Manager begins watching registered resources. The `ClusterRuleReconciler` is registered to watch `ClusterRule` and `Node` kinds.
 2. **Reconciliation Trigger**: When a `ClusterRule` is created/updated, or any watched `Node` changes, the Reconciler is triggered (via a Map function mapping Node events to all ClusterRules).
 3. **Evaluation**: The Reconciler fetches all cluster `Node`s matching the `nodeSelector` (or all nodes if empty) and evaluates their specifications (Kubelet version, Container Runtime, Kernel version, OS image, CPU architecture), health status conditions, and allocatable hardware resource capacities against the rules specified in the `ClusterRule`.
-4. **Status & Event Update**: 
-   - If deviations are found, the Reconciler logs the non-compliance and emits a `Warning` Kubernetes Event on the `ClusterRule` object.
+4. **Status, Event, Active Labeling & Remediation Update**: 
+   - If deviations are found, the Reconciler logs the non-compliance and emits warning events. If `complianceLabel` or `customLabels` are configured, it deletes these labels from the non-compliant node. If `action` is `Enforce` and the node is a worker node (not control plane), it actively cordons the node (`Unschedulable = true`) and adds a custom quarantine annotation. Control plane nodes are automatically skipped for safety.
+   - If nodes are compliant, the Reconciler ensures the configured `complianceLabel` and `customLabels` are applied. If the node was previously cordoned/quarantined by KubeOrthos under `Action: Enforce`, it actively uncordons it and removes the quarantine annotation.
    - The Operator updates the `Status` subresource (specifically the `Conditions` array) of the `ClusterRule` to report the overall compliance state (True if compliant, False if deviations exist). If no nodes match the selector, it sets a distinct `NoMatchingNodes` reason.
+   - All state modifications (labels and cordoning) are combined into a single transactional `Update` call per node to maximize performance.
 
 ## Development Principles
 

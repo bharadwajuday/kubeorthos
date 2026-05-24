@@ -46,7 +46,7 @@ type ClusterRuleReconciler struct {
 // +kubebuilder:rbac:groups=audit.kubeorthos.io,resources=clusterrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=audit.kubeorthos.io,resources=clusterrules/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=audit.kubeorthos.io,resources=clusterrules/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
@@ -180,7 +180,106 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			log.Info("Node is non-compliant", "node", node.Name, "mismatches", mismatchMsg)
 			if rule.Spec.Action == auditv1alpha1.ActionAudit {
 				r.Recorder.Eventf(&rule, nil, corev1.EventTypeWarning, "NonCompliantNode", "ActionAudit", "Node %s is non-compliant: %s", node.Name, mismatchMsg)
+			} else if rule.Spec.Action == auditv1alpha1.ActionEnforce {
+				r.Recorder.Eventf(&rule, nil, corev1.EventTypeWarning, "NonCompliantNodeEnforced", "ActionEnforce", "Node %s is non-compliant and is being enforced: %s", node.Name, mismatchMsg)
 			}
+		}
+
+		nodeUpdated := false
+
+		// Cordoning Enforcement (Proposal 5)
+		if rule.Spec.Action == auditv1alpha1.ActionEnforce {
+			// Check if control plane node
+			_, isCP := node.Labels["node-role.kubernetes.io/control-plane"]
+			_, isMaster := node.Labels["node-role.kubernetes.io/master"]
+			isControlPlane := isCP || isMaster
+
+			if isControlPlane {
+				log.Info("Skipping active enforcement on control-plane node", "node", node.Name)
+			} else {
+				if !isCompliant {
+					if !node.Spec.Unschedulable {
+						node.Spec.Unschedulable = true
+						if node.Annotations == nil {
+							node.Annotations = make(map[string]string)
+						}
+						node.Annotations["policy.kubeorthos.io/quarantined"] = "true"
+						nodeUpdated = true
+						r.Recorder.Eventf(&rule, nil, corev1.EventTypeWarning, "CordonedNode", "Enforcement", "Successfully cordoned non-compliant worker node %s", node.Name)
+						log.Info("Cordoned non-compliant worker node", "node", node.Name)
+					}
+				} else {
+					// Compliant node - check if it was quarantined by KubeOrthos
+					if node.Annotations != nil {
+						if _, isQuarantined := node.Annotations["policy.kubeorthos.io/quarantined"]; isQuarantined {
+							node.Spec.Unschedulable = false
+							delete(node.Annotations, "policy.kubeorthos.io/quarantined")
+							nodeUpdated = true
+							r.Recorder.Eventf(&rule, nil, corev1.EventTypeNormal, "UncordonedNode", "Enforcement", "Successfully uncordoned compliant worker node %s", node.Name)
+							log.Info("Uncordoned compliant worker node", "node", node.Name)
+						}
+					}
+				}
+			}
+		}
+
+		// Active Compliance & Custom Labeling
+		if rule.Spec.ComplianceLabel != nil || len(rule.Spec.CustomLabels) > 0 {
+			nodeLabels := node.GetLabels()
+			if nodeLabels == nil {
+				nodeLabels = make(map[string]string)
+			}
+
+			if isCompliant {
+				// Node is compliant, ensure compliance label is applied
+				if rule.Spec.ComplianceLabel != nil {
+					labelKey := rule.Spec.ComplianceLabel.Key
+					labelValue := rule.Spec.ComplianceLabel.Value
+					if val, exists := nodeLabels[labelKey]; !exists || val != labelValue {
+						nodeLabels[labelKey] = labelValue
+						nodeUpdated = true
+						r.Recorder.Eventf(&rule, nil, corev1.EventTypeNormal, "ComplianceLabelApplied", "ComplianceLabel", "Successfully applied label %s=%s to node %s", labelKey, labelValue, node.Name)
+					}
+				}
+				// Node is compliant, ensure custom labels are applied
+				for k, v := range rule.Spec.CustomLabels {
+					if val, exists := nodeLabels[k]; !exists || val != v {
+						nodeLabels[k] = v
+						nodeUpdated = true
+						r.Recorder.Eventf(&rule, nil, corev1.EventTypeNormal, "CustomLabelApplied", "ComplianceLabel", "Successfully applied custom label %s=%s to node %s", k, v, node.Name)
+					}
+				}
+			} else {
+				// Node is non-compliant, ensure compliance label is removed
+				if rule.Spec.ComplianceLabel != nil {
+					labelKey := rule.Spec.ComplianceLabel.Key
+					if _, exists := nodeLabels[labelKey]; exists {
+						delete(nodeLabels, labelKey)
+						nodeUpdated = true
+						r.Recorder.Eventf(&rule, nil, corev1.EventTypeWarning, "ComplianceLabelRemoved", "ComplianceLabel", "Successfully removed label %s from non-compliant node %s", labelKey, node.Name)
+					}
+				}
+				// Node is non-compliant, ensure custom labels are removed
+				for k := range rule.Spec.CustomLabels {
+					if _, exists := nodeLabels[k]; exists {
+						delete(nodeLabels, k)
+						nodeUpdated = true
+						r.Recorder.Eventf(&rule, nil, corev1.EventTypeWarning, "CustomLabelRemoved", "ComplianceLabel", "Successfully removed custom label %s from non-compliant node %s", k, node.Name)
+					}
+				}
+			}
+
+			if nodeUpdated {
+				node.SetLabels(nodeLabels)
+			}
+		}
+
+		if nodeUpdated {
+			if err := r.Update(ctx, &node); err != nil {
+				log.Error(err, "unable to update node specs/labels", "node", node.Name)
+				return ctrl.Result{}, err
+			}
+			log.Info("Successfully updated node state", "node", node.Name)
 		}
 	}
 

@@ -46,6 +46,30 @@ spec:
                 - Audit
                 - Enforce
                 type: string
+              complianceLabel:
+                description: |-
+                  ComplianceLabel defines a key-value label to actively apply to compliant nodes
+                  and remove from non-compliant nodes.
+                properties:
+                  key:
+                    description: Key specifies the label key to apply to compliant
+                      nodes (e.g. "kubeorthos.io/compliant")
+                    type: string
+                  value:
+                    description: Value specifies the label value to apply to compliant
+                      nodes (e.g. "true")
+                    type: string
+                required:
+                - key
+                - value
+                type: object
+              customLabels:
+                additionalProperties:
+                  type: string
+                description: |-
+                  CustomLabels defines arbitrary key-value labels to actively apply to compliant nodes
+                  and remove from non-compliant nodes.
+                type: object
               expectedConditions:
                 description: ExpectedConditions specifies the required state of node
                   status conditions.

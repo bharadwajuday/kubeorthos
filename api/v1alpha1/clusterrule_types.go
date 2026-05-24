@@ -84,6 +84,17 @@ type MinResourceRequirements struct {
 	Storage *resource.Quantity `json:"storage,omitempty"`
 }
 
+// ComplianceLabelSpec defines the key-value label to apply to compliant nodes
+type ComplianceLabelSpec struct {
+	// Key specifies the label key to apply to compliant nodes (e.g. "kubeorthos.io/compliant")
+	// +kubebuilder:validation:Required
+	Key string `json:"key"`
+
+	// Value specifies the label value to apply to compliant nodes (e.g. "true")
+	// +kubebuilder:validation:Required
+	Value string `json:"value"`
+}
+
 // ClusterRuleSpec defines the desired state of ClusterRule
 type ClusterRuleSpec struct {
 	// Action specifies what to do when a node does not match the expected configuration
@@ -106,6 +117,16 @@ type ClusterRuleSpec struct {
 	// MinimumResources specifies the minimum hardware capacity expected on matching nodes.
 	// +optional
 	MinimumResources *MinResourceRequirements `json:"minimumResources,omitempty"`
+
+	// ComplianceLabel defines a key-value label to actively apply to compliant nodes
+	// and remove from non-compliant nodes.
+	// +optional
+	ComplianceLabel *ComplianceLabelSpec `json:"complianceLabel,omitempty"`
+
+	// CustomLabels defines arbitrary key-value labels to actively apply to compliant nodes
+	// and remove from non-compliant nodes.
+	// +optional
+	CustomLabels map[string]string `json:"customLabels,omitempty"`
 }
 
 // ClusterRuleStatus defines the observed state of ClusterRule.

@@ -4,9 +4,9 @@ metadata:
   labels:
     app.kubernetes.io/name: kubeorthos
     app.kubernetes.io/managed-by: kustomize
-  name: clusterrule-sample
+  name: clusterrule-enforce-sample
 spec:
-  action: Audit
+  action: Enforce
   nodeSelector:
     matchLabels:
       kubernetes.io/os: linux
