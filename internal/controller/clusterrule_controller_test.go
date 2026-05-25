@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	auditv1alpha1 "kubeorthos/api/v1alpha1"
+	"kubeorthos/internal/constants"
+	"kubeorthos/internal/utils"
+
+	batchv1 "k8s.io/api/batch/v1"
 )
 
 var _ = Describe("ClusterRule Controller", func() {
@@ -97,10 +102,10 @@ var _ = Describe("ClusterRule Controller", func() {
 
 			// Fetch rule again
 			Expect(k8sClient.Get(ctx, typeNamespacedName, rule)).To(Succeed())
-			cond := meta.FindStatusCondition(rule.Status.Conditions, "Compliant")
+			cond := meta.FindStatusCondition(rule.Status.Conditions, constants.ConditionTypeCompliant)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(cond.Reason).To(Equal("AllNodesCompliant"))
+			Expect(cond.Reason).To(Equal(constants.ConditionReasonAllNodesCompliant))
 		})
 
 		It("should report NoMatchingNodes if nodeSelector is set but no nodes match", func() {
@@ -142,10 +147,10 @@ var _ = Describe("ClusterRule Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, typeNamespacedName, rule)).To(Succeed())
-			cond := meta.FindStatusCondition(rule.Status.Conditions, "Compliant")
+			cond := meta.FindStatusCondition(rule.Status.Conditions, constants.ConditionTypeCompliant)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(cond.Reason).To(Equal("NoMatchingNodes"))
+			Expect(cond.Reason).To(Equal(constants.ConditionReasonNoMatchingNodes))
 			Expect(cond.Message).To(Equal("No nodes matched the specified node selector"))
 		})
 
@@ -241,10 +246,10 @@ var _ = Describe("ClusterRule Controller", func() {
 
 			// Fetch the rule and check status
 			Expect(k8sClient.Get(ctx, typeNamespacedName, rule)).To(Succeed())
-			cond := meta.FindStatusCondition(rule.Status.Conditions, "Compliant")
+			cond := meta.FindStatusCondition(rule.Status.Conditions, constants.ConditionTypeCompliant)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("NodesNonCompliant"))
+			Expect(cond.Reason).To(Equal(constants.ConditionReasonNodesNonCompliant))
 			// Only 1 node (worker-node-2) should be reported non-compliant. master-node is ignored.
 			Expect(cond.Message).To(Equal("1 node(s) are non-compliant"))
 		})
@@ -366,10 +371,10 @@ var _ = Describe("ClusterRule Controller", func() {
 
 			// Fetch the rule and check status
 			Expect(k8sClient.Get(ctx, typeNamespacedName, rule)).To(Succeed())
-			cond := meta.FindStatusCondition(rule.Status.Conditions, "Compliant")
+			cond := meta.FindStatusCondition(rule.Status.Conditions, constants.ConditionTypeCompliant)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("NodesNonCompliant"))
+			Expect(cond.Reason).To(Equal(constants.ConditionReasonNodesNonCompliant))
 			// 2 nodes (pressure-node, low-cpu-node) should be non-compliant
 			Expect(cond.Message).To(Equal("2 node(s) are non-compliant"))
 		})
@@ -507,7 +512,7 @@ var _ = Describe("ClusterRule Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "worker-compliant-quarantined",
 					Annotations: map[string]string{
-						"policy.kubeorthos.io/quarantined": "true",
+						constants.AnnotationQuarantined: "true",
 					},
 				},
 				Spec: corev1.NodeSpec{
@@ -536,7 +541,7 @@ var _ = Describe("ClusterRule Controller", func() {
 			// Verify Node 1: Non-compliant worker is now cordoned and has the quarantine annotation
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-non-compliant"}, workerNonCompliant)).To(Succeed())
 			Expect(workerNonCompliant.Spec.Unschedulable).To(BeTrue())
-			Expect(workerNonCompliant.Annotations).To(HaveKeyWithValue("policy.kubeorthos.io/quarantined", "true"))
+			Expect(workerNonCompliant.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantined, "true"))
 
 			// Verify Node 2: Non-compliant control plane node is NOT cordoned
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cp-non-compliant"}, cpNonCompliant)).To(Succeed())
@@ -545,7 +550,7 @@ var _ = Describe("ClusterRule Controller", func() {
 			// Verify Node 3: Compliant worker node has been uncordoned and quarantine annotation removed
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-compliant-quarantined"}, workerCompliantQuarantined)).To(Succeed())
 			Expect(workerCompliantQuarantined.Spec.Unschedulable).To(BeFalse())
-			Expect(workerCompliantQuarantined.Annotations).NotTo(HaveKey("policy.kubeorthos.io/quarantined"))
+			Expect(workerCompliantQuarantined.Annotations).NotTo(HaveKey(constants.AnnotationQuarantined))
 		})
 
 		It("should uncordon worker nodes when a rule action transitions from Enforce to Audit", func() {
@@ -571,7 +576,7 @@ var _ = Describe("ClusterRule Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "quarantined-worker-transition",
 					Annotations: map[string]string{
-						"policy.kubeorthos.io/quarantined": "true",
+						constants.AnnotationQuarantined: "true",
 					},
 				},
 				Spec: corev1.NodeSpec{
@@ -600,7 +605,7 @@ var _ = Describe("ClusterRule Controller", func() {
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "quarantined-worker-transition"}, quarantinedWorker)).To(Succeed())
 			Expect(quarantinedWorker.Spec.Unschedulable).To(BeTrue())
-			Expect(quarantinedWorker.Annotations).To(HaveKeyWithValue("policy.kubeorthos.io/quarantined", "true"))
+			Expect(quarantinedWorker.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantined, "true"))
 
 			// 2. Change rule Action to Audit
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: transitionRuleName, Namespace: "default"}, rule)).To(Succeed())
@@ -615,7 +620,86 @@ var _ = Describe("ClusterRule Controller", func() {
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "quarantined-worker-transition"}, quarantinedWorker)).To(Succeed())
 			Expect(quarantinedWorker.Spec.Unschedulable).To(BeFalse())
-			Expect(quarantinedWorker.Annotations).NotTo(HaveKey("policy.kubeorthos.io/quarantined"))
+			Expect(quarantinedWorker.Annotations).NotTo(HaveKey(constants.AnnotationQuarantined))
+		})
+
+		It("should trigger automated resource reclamation when node experiences DiskPressure", func() {
+			reclaimRuleName := "test-reclaim-rule"
+
+			rule := &auditv1alpha1.ClusterRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      reclaimRuleName,
+					Namespace: "default",
+				},
+				Spec: auditv1alpha1.ClusterRuleSpec{
+					Action: auditv1alpha1.ActionAudit,
+					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
+						KubeletVersion: "v1.34.0",
+					},
+					Reclamation: &auditv1alpha1.ReclamationSpec{
+						DiskPressure: &auditv1alpha1.DiskPressureReclamation{
+							CleanImages:     utils.BoolPtr(true),
+							CleanContainers: utils.BoolPtr(true),
+							CleanLogs:       utils.BoolPtr(true),
+							LogSizeLimit:    "100Mi",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
+
+			// Node: Targeted worker node experiencing DiskPressure
+			pressuredNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pressured-worker-node",
+				},
+			}
+			Expect(k8sClient.Create(ctx, pressuredNode)).To(Succeed())
+			pressuredNode.Status = corev1.NodeStatus{
+				NodeInfo: corev1.NodeSystemInfo{
+					KubeletVersion: "v1.34.0",
+				},
+				Conditions: []corev1.NodeCondition{
+					{
+						Type:   corev1.NodeDiskPressure,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, pressuredNode)).To(Succeed())
+
+			controllerReconciler := &ClusterRuleReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			// 1. Reconcile: should spawn the Job
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: reclaimRuleName, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify Job was created
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-test-reclaim-rule-pressured-worker-node", Namespace: "default"}, job)).To(Succeed())
+			Expect(job.Spec.Template.Spec.NodeName).To(Equal("pressured-worker-node"))
+			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Privileged).To(Equal(utils.BoolPtr(true)))
+
+			// 2. Mark Job as Succeeded and reconcile: should delete the Job
+			job.Status.Succeeded = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: reclaimRuleName, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify Job is deleted
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-test-reclaim-rule-pressured-worker-node", Namespace: "default"}, job)
+				g.Expect(apierrors.IsNotFound(err) || job.DeletionTimestamp != nil).To(BeTrue())
+			}, "10s").Should(Succeed())
 		})
 	})
 })

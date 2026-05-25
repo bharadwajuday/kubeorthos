@@ -63,6 +63,12 @@ spec:
   customLabels:
     environment: "production"
     tier: "frontend"
+  reclamation:
+    diskPressure:
+      cleanImages: true
+      cleanContainers: true
+      cleanLogs: true
+      logSizeLimit: "100Mi"
 ```
 
 2. Apply the rule to your cluster:
@@ -76,6 +82,8 @@ kubectl apply -f baseline.yaml
    - **Worker Nodes**: Actively cordoned (`Unschedulable = true`) and annotated with `policy.kubeorthos.io/quarantined: "true"`.
    - **Control Plane Nodes**: Automatically excluded from active cordoning to protect cluster stability.
    - **Remediation**: Once a cordoned node becomes compliant, the operator automatically uncordons it and removes the quarantine annotation.
+
+5. **Automated Resource Reclamation**: If `reclamation` is configured and a targeted worker node experiences `DiskPressure`, KubeOrthos dynamically triggers a node-level cleanup Job to prune unused images, delete stopped containers, and truncate large logs to actively restore the node to health.
 
 If any deviations are found, the operator will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
 

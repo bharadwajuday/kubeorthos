@@ -95,6 +95,32 @@ type ComplianceLabelSpec struct {
 	Value string `json:"value"`
 }
 
+// DiskPressureReclamation configures automated disk pressure mitigation routines
+type DiskPressureReclamation struct {
+	// CleanImages specifies whether to prune unused container images (default: true)
+	// +optional
+	CleanImages *bool `json:"cleanImages,omitempty"`
+
+	// CleanContainers specifies whether to prune stopped/exited containers (default: true)
+	// +optional
+	CleanContainers *bool `json:"cleanContainers,omitempty"`
+
+	// CleanLogs specifies whether to truncate large container logs (default: false)
+	// +optional
+	CleanLogs *bool `json:"cleanLogs,omitempty"`
+
+	// LogSizeLimit specifies the threshold before truncating logs (e.g. "100Mi")
+	// +optional
+	LogSizeLimit string `json:"logSizeLimit,omitempty"`
+}
+
+// ReclamationSpec configures automated cleanups on non-compliant nodes
+type ReclamationSpec struct {
+	// DiskPressure configures automated disk pressure mitigation routines
+	// +optional
+	DiskPressure *DiskPressureReclamation `json:"diskPressure,omitempty"`
+}
+
 // ClusterRuleSpec defines the desired state of ClusterRule
 type ClusterRuleSpec struct {
 	// Action specifies what to do when a node does not match the expected configuration
@@ -127,6 +153,10 @@ type ClusterRuleSpec struct {
 	// and remove from non-compliant nodes.
 	// +optional
 	CustomLabels map[string]string `json:"customLabels,omitempty"`
+
+	// Reclamation configures automated self-healing resource cleanups on non-compliant nodes.
+	// +optional
+	Reclamation *ReclamationSpec `json:"reclamation,omitempty"`
 }
 
 // ClusterRuleStatus defines the observed state of ClusterRule.

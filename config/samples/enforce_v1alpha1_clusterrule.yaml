@@ -33,3 +33,10 @@ spec:
   customLabels:
     environment: "production"
     tier: "frontend"
+  reclamation:
+    diskPressure:
+      cleanImages: true
+      cleanContainers: true
+      cleanLogs: true
+      logSizeLimit: "100Mi"
+

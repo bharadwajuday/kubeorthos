@@ -195,6 +195,32 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+              reclamation:
+                description: Reclamation configures automated self-healing resource
+                  cleanups on non-compliant nodes.
+                properties:
+                  diskPressure:
+                    description: DiskPressure configures automated disk pressure mitigation
+                      routines
+                    properties:
+                      cleanContainers:
+                        description: 'CleanContainers specifies whether to prune stopped/exited
+                          containers (default: true)'
+                        type: boolean
+                      cleanImages:
+                        description: 'CleanImages specifies whether to prune unused
+                          container images (default: true)'
+                        type: boolean
+                      cleanLogs:
+                        description: 'CleanLogs specifies whether to truncate large
+                          container logs (default: false)'
+                        type: boolean
+                      logSizeLimit:
+                        description: LogSizeLimit specifies the threshold before truncating
+                          logs (e.g. "100Mi")
+                        type: string
+                    type: object
+                type: object
             required:
             - action
             - expectedNodeConfig
