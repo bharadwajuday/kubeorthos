@@ -16,16 +16,6 @@ rules:
   - watch
 - apiGroups:
   - ""
-  resources:
-  - pods
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
   - events.k8s.io
   resources:
   - events

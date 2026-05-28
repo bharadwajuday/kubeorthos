@@ -687,7 +687,10 @@ var _ = Describe("ClusterRule Controller", func() {
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-test-reclaim-rule-pressured-worker-node", Namespace: "default"}, job)).To(Succeed())
 			Expect(job.Spec.Template.Spec.NodeName).To(Equal("pressured-worker-node"))
-			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Privileged).To(Equal(utils.BoolPtr(true)))
+			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Privileged).To(BeNil())
+			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation).To(Equal(utils.BoolPtr(false)))
+			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
+			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities.Add).To(ContainElement(corev1.Capability("DAC_OVERRIDE")))
 
 			// 2. Mark Job as Succeeded and reconcile: should delete the Job
 			job.Status.Succeeded = 1

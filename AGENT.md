@@ -16,11 +16,11 @@ The application is structured following standard Go Kubernetes Operator patterns
 
 ### 2. `api/` (CRDs)
 - **Responsibility**: Defines the Custom Resources.
-- **Key Concepts**: Contains the Go struct definitions for our CRDs (e.g., `ClusterPolicy`, `ConfigurationCheck`). These are used to generate the Kubernetes YAML manifests and DeepCopy methods.
+- **Key Concepts**: Contains the Go struct definitions for our CRDs. The primary CRD is `ClusterRule`, which is configured as a cluster-scoped (non-namespaced) resource. This protects the cluster's multi-tenancy model by restricting configuration to cluster administrators. It also enforces input parameter sanity (e.g., regex pattern validation on `LogSizeLimit`).
 
 ### 3. `internal/controller`
 - **Responsibility**: The Reconcile loops.
-- **Key Concepts**: Watches the CRDs and standard Kubernetes resources (e.g., `Node` objects). The `ClusterRuleReconciler` specifically watches `ClusterRule` objects and maps events from `Node` changes back to the `ClusterRule`s. It uses a custom Node Predicate filter to ignore highly frequent heartbeat updates (timestamp updates in conditions) and only triggers reconciliation on spec, allocatable resource, labels/annotations metadata, or key condition status changes. It filters target nodes using `nodeSelector` and evaluates their specifications against the expectations. It applies strategic JSON patching (`client.MergeFrom`) rather than full updates to prevent optimistic locking conflicts.
+- **Key Concepts**: Watches the CRDs and standard Kubernetes resources (e.g., `Node` objects). The `ClusterRuleReconciler` specifically watches `ClusterRule` objects and maps events from `Node` changes back to the `ClusterRule`s. It uses a custom Node Predicate filter to ignore highly frequent heartbeat updates and only triggers reconciliation on spec, metadata, allocatable capacity, or condition status changes. It applies strategic JSON patching (`client.MergeFrom`) to prevent lock conflicts. Direct `pods` RBAC permissions are omitted from the manager role to enforce strict Least Privilege.
 
 ### 4. `internal/constants`
 - **Responsibility**: Centralized Shared Constants.
@@ -28,7 +28,7 @@ The application is structured following standard Go Kubernetes Operator patterns
 
 ### 5. `internal/utils`
 - **Responsibility**: Shared Helper Utilities.
-- **Key Concepts**: Contains helper modules like `jobs.go` which constructs template-based ephemeral cleanup/reclamation Jobs to run on non-compliant nodes under disk pressure, and `utils.go` which exports common pointer references (`BoolPtr`, `Int32Ptr`) used in API payloads.
+- **Key Concepts**: Contains helper modules like `jobs.go` which constructs template-based ephemeral cleanup/reclamation Jobs configured with a hardened security context (non-privileged mode, no privilege escalation, dropped capabilities, and `DAC_OVERRIDE` capability for secure log truncation). `utils.go` exports common pointer references (`BoolPtr`, `Int32Ptr`) used in API payloads.
 
 ### 6. `internal/validator`
 - **Responsibility**: The core rule engine.
@@ -46,7 +46,7 @@ The application is structured following standard Go Kubernetes Operator patterns
 4. **Status, Event, Active Labeling, Remediation & Reclamation Update**: 
    - If deviations are found, the Reconciler logs the non-compliance and emits warning events. If `complianceLabel` or `customLabels` are configured, it deletes these labels from the non-compliant node. If `action` is `Enforce` and the node is a worker node (not control plane), KubeOrthos actively cordons the node (`Unschedulable = true`) and adds a Namespaced Quarantine annotation: `quarantine.kubeorthos.io/<rule-name>: "true"`. It also sets `policy.kubeorthos.io/quarantined: "true"`. Control plane nodes are automatically skipped for safety.
    - If nodes are compliant, KubeOrthos ensures the configured `complianceLabel` and `customLabels` are applied. If the node was previously cordoned/quarantined by this rule, KubeOrthos releases its namespaced quarantine claim (`quarantine.kubeorthos.io/<rule-name>`). It safely uncordons the node (`Unschedulable = false`) and removes the general quarantine annotation **only** if no other active rule claim annotations remain on the node, preventing "split-brain" uncordon loops between overlapping rules.
-   - **Automated Resource Reclamation**: If a targeted worker node experiences `DiskPressure` and the `reclamation` block is configured, the reconciler automatically spawns an ephemeral node-reclamation Job to clean up unused images, containers, and truncate large logs directly on the node via Unix socket/directory mounting. Successful and failed Jobs are automatically monitored, reported via events, and cleaned up.
+   - **Automated Resource Reclamation**: If a targeted worker node experiences `DiskPressure` and the `reclamation` block is configured, the reconciler automatically spawns an ephemeral, non-privileged node-reclamation Job in the designated namespace (defaulting to `"default"`). The Job mounts host directories and executes the cleanup script utilizing strict DAC capabilities (`DAC_OVERRIDE`) instead of running in privileged root host bypass mode. The `logSizeLimit` input parameter is validated via regex patterns to prevent shell command injection. Successful and failed Jobs are automatically monitored, reported via events, and cleaned up.
    - KubeOrthos updates the `Status` subresource (specifically the `Conditions` array) of the `ClusterRule` to report the overall compliance state (True if compliant, False if deviations exist). If no nodes match the selector, it sets a distinct `NoMatchingNodes` reason.
    - All state modifications (node specs, labels, annotations) and CRD statuses are executed using transactional client JSON strategic patching (`client.MergeFrom`) rather than full `Update`/`Status().Update` calls, guaranteeing 100% thread safety and eliminating Optimistic Locking conflicts (`409 Conflict`) under parallel reconciliation workloads.
 

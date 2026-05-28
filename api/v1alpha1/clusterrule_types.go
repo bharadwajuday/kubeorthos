@@ -111,6 +111,7 @@ type DiskPressureReclamation struct {
 
 	// LogSizeLimit specifies the threshold before truncating logs (e.g. "100Mi")
 	// +optional
+	// +kubebuilder:validation:Pattern="^[0-9]+[kKmMgGtTpP]i?$"
 	LogSizeLimit string `json:"logSizeLimit,omitempty"`
 }
 
@@ -184,6 +185,7 @@ type ClusterRuleStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster
 
 // ClusterRule is the Schema for the clusterrules API
 type ClusterRule struct {

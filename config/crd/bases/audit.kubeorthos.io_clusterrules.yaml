@@ -12,7 +12,7 @@ spec:
     listKind: ClusterRuleList
     plural: clusterrules
     singular: clusterrule
-  scope: Namespaced
+  scope: Cluster
   versions:
   - name: v1alpha1
     schema:
@@ -218,6 +218,7 @@ spec:
                       logSizeLimit:
                         description: LogSizeLimit specifies the threshold before truncating
                           logs (e.g. "100Mi")
+                        pattern: ^[0-9]+[kKmMgGtTpP]i?$
                         type: string
                     type: object
                 type: object

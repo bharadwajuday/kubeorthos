@@ -60,7 +60,6 @@ type ClusterRuleReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -417,12 +416,17 @@ func (r *ClusterRuleReconciler) reconcileReclamation(ctx context.Context, rule *
 		return nil
 	}
 
+	jobNamespace := rule.Namespace
+	if jobNamespace == "" {
+		jobNamespace = "default"
+	}
+
 	jobList := &batchv1.JobList{}
 	labelSelector := labels.SelectorFromSet(labels.Set{
 		constants.LabelReclamationNode: node.Name,
 		constants.LabelClusterRule:     rule.Name,
 	})
-	if err := r.List(ctx, jobList, client.InNamespace(rule.Namespace), client.MatchingLabelsSelector{Selector: labelSelector}); err != nil {
+	if err := r.List(ctx, jobList, client.InNamespace(jobNamespace), client.MatchingLabelsSelector{Selector: labelSelector}); err != nil {
 		log.Error(err, "unable to list reclamation jobs", "node", node.Name)
 		return err
 	}
@@ -470,7 +474,7 @@ func (r *ClusterRuleReconciler) reconcileReclamation(ctx context.Context, rule *
 			script += fmt.Sprintf("find /host/var/log/pods -type f -name '*.log' -size +%s -exec truncate -s 0 {} \\;\n", logSizeLimit)
 		}
 
-		job := utils.NewReclamationJob(jobName, rule.Namespace, node.Name, script, jobLabels)
+		job := utils.NewReclamationJob(jobName, jobNamespace, node.Name, script, jobLabels)
 
 		if err := r.Create(ctx, job); err != nil {
 			log.Error(err, "unable to create reclamation job", "job", jobName)

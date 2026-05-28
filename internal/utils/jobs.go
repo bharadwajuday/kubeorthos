@@ -47,7 +47,11 @@ func NewReclamationJob(name, namespace, nodeName, script string, labels map[stri
 							Image:   constants.DefaultReclamationImage,
 							Command: []string{"sh", "-c", script},
 							SecurityContext: &corev1.SecurityContext{
-								Privileged: BoolPtr(true),
+								AllowPrivilegeEscalation: BoolPtr(false),
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+									Add:  []corev1.Capability{"DAC_OVERRIDE"},
+								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{

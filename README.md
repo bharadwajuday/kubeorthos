@@ -32,7 +32,7 @@ make run
 
 ### Usage: ClusterRule
 
-KubeOrthos allows you to define a `ClusterRule` to audit your nodes and ensure they are running expected configurations like specific Kubelet and Container Runtime versions.
+KubeOrthos allows you to define a cluster-scoped (non-namespaced) `ClusterRule` resource to audit your nodes and ensure they are running expected configurations like specific Kubelet and Container Runtime versions. Because it is cluster-scoped, only cluster-level administrators can configure policies, preventing privilege escalation from namespaced tenants.
 
 1. Create a `ClusterRule` YAML file (e.g., `baseline.yaml`):
 ```yaml
@@ -87,6 +87,8 @@ kubectl apply -f baseline.yaml
    - **Remediation & Reference-Counted Uncordoning**: Once a cordoned node becomes compliant, KubeOrthos releases its rule-specific quarantine claim (`quarantine.kubeorthos.io/<rule-name>`). The node is safely uncordoned and the general quarantined annotation removed **only** if no other active policies are still claiming quarantine annotations on that node. This prevents split-brain reconcile loops between overlapping rules.
 
 5. **Automated Resource Reclamation**: If `reclamation` is configured and a targeted worker node experiences `DiskPressure`, KubeOrthos dynamically triggers a node-level cleanup Job to prune unused images, delete stopped containers, and truncate large logs to actively restore the node to health.
+   - **Shell Injection (RCE) Prevention**: The `logSizeLimit` field uses a strict regex pattern validation marker (`^[0-9]+[kKmMgGtTpP]i?$`) at the Kubernetes API Admission level to block malicious shell characters or control sequences.
+   - **Hardened Execution Context**: The reclamation Job container runs in a non-privileged context, blocks privilege escalation (`AllowPrivilegeEscalation: false`), drops all standard Linux capabilities, and mounts only the containerd socket and host logs directory with the narrow `DAC_OVERRIDE` capability (necessary to safely truncate root-owned log files on host volumes).
 
 If any deviations are found, the operator will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
 
