@@ -11,6 +11,7 @@ It helps you validate, enforce, and maintain the desired state and best practice
 - **API Server & Event Filtering (Heartbeat Predicates)**: Drops reconciler resource usage by >99% on idle clusters by ignoring frequent, timestamp-only Node status updates (e.g., last heartbeat) and only triggering on genuine changes to specs, key metadata, allocatable capacity, or condition statuses.
 - **Conflict-Resilient strategic JSON Patching**: Employs transactional client JSON strategic patching (`client.MergeFrom`) rather than full `Update` objects, ensuring 100% thread-safety and zero Optimistic Locking conflicts (`409 Conflict`) even when multiple rules reconcile in parallel.
 - **Detailed Reconciliation Observability**: Outputs structured trace logs specifying exactly which rule expectations are evaluated for each node.
+- **Validating Admission Webhook**: Performs real-time syntactic and semantic validation for `ClusterRule` resources at the API admission level. It uses `metav1.LabelSelectorAsSelector` to validate and reject unparseable/invalid node selectors, and enforces that `expectedNodeConfig` is never empty.
 
 ## Getting Started
 
@@ -91,6 +92,12 @@ kubectl apply -f baseline.yaml
    - **Hardened Execution Context**: The reclamation Job container runs in a non-privileged context, blocks privilege escalation (`AllowPrivilegeEscalation: false`), drops all standard Linux capabilities, and mounts only the containerd socket and host logs directory with the narrow `DAC_OVERRIDE` capability (necessary to safely truncate root-owned log files on host volumes).
 
 If any deviations are found, the operator will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
+
+### Validating Webhook
+
+KubeOrthos includes a Validating Admission Webhook that intercepts `ClusterRule` creation and update requests. The webhook enforces:
+1. **Invalid Node Selectors**: If a `nodeSelector` is defined, it validates it using `metav1.LabelSelectorAsSelector`. Any invalid operator or expression is rejected before it is persisted in etcd.
+2. **Empty Expected Node Configuration**: Enforces that `expectedNodeConfig` cannot be empty. At least one expected field (`kubeletVersion`, `containerRuntime`, `kernelVersion`, `osImage`, or `architecture`) must be specified.
 
 ## Project Structure
 
