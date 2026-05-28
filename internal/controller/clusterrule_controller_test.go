@@ -35,6 +35,7 @@ import (
 	"kubeorthos/internal/utils"
 
 	batchv1 "k8s.io/api/batch/v1"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 var _ = Describe("ClusterRule Controller", func() {
@@ -512,7 +513,8 @@ var _ = Describe("ClusterRule Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "worker-compliant-quarantined",
 					Annotations: map[string]string{
-						constants.AnnotationQuarantined: "true",
+						constants.AnnotationQuarantinePrefix + "test-enforce-rule": constants.ValueTrue,
+						constants.AnnotationQuarantined:                            constants.ValueTrue,
 					},
 				},
 				Spec: corev1.NodeSpec{
@@ -576,7 +578,8 @@ var _ = Describe("ClusterRule Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "quarantined-worker-transition",
 					Annotations: map[string]string{
-						constants.AnnotationQuarantined: "true",
+						constants.AnnotationQuarantinePrefix + "test-transition-rule": constants.ValueTrue,
+						constants.AnnotationQuarantined:                               constants.ValueTrue,
 					},
 				},
 				Spec: corev1.NodeSpec{
@@ -700,6 +703,228 @@ var _ = Describe("ClusterRule Controller", func() {
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-test-reclaim-rule-pressured-worker-node", Namespace: "default"}, job)
 				g.Expect(apierrors.IsNotFound(err) || job.DeletionTimestamp != nil).To(BeTrue())
 			}, "10s").Should(Succeed())
+		})
+
+		It("should safely handle multiple overlapping ClusterRules under Scoped Quarantining", func() {
+			ruleAName := "test-rule-a"
+			ruleBName := "test-rule-b"
+
+			// Create Rule A (Enforce mode)
+			ruleA := &auditv1alpha1.ClusterRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ruleAName,
+					Namespace: "default",
+				},
+				Spec: auditv1alpha1.ClusterRuleSpec{
+					Action: auditv1alpha1.ActionEnforce,
+					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
+						KubeletVersion: "v1.34.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ruleA)).To(Succeed())
+
+			// Create Rule B (Enforce mode)
+			ruleB := &auditv1alpha1.ClusterRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ruleBName,
+					Namespace: "default",
+				},
+				Spec: auditv1alpha1.ClusterRuleSpec{
+					Action: auditv1alpha1.ActionEnforce,
+					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
+						KubeletVersion: "v1.34.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ruleB)).To(Succeed())
+
+			// Create worker node quarantined by BOTH Rule A and Rule B
+			nodeName := "worker-shared-quarantine"
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: nodeName,
+					Annotations: map[string]string{
+						constants.AnnotationQuarantinePrefix + ruleAName: "true",
+						constants.AnnotationQuarantinePrefix + ruleBName: "true",
+						constants.AnnotationQuarantined:                  "true",
+					},
+				},
+				Spec: corev1.NodeSpec{
+					Unschedulable: true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+			// Node is actually compliant now
+			node.Status = corev1.NodeStatus{
+				NodeInfo: corev1.NodeSystemInfo{
+					KubeletVersion: "v1.34.0",
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+
+			controllerReconciler := &ClusterRuleReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			// 1. Reconcile with Rule A: should delete quarantine key A but LEAVE node cordoned because key B is still present!
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: ruleAName, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+			Expect(node.Spec.Unschedulable).To(BeTrue())                                                          // Still cordoned!
+			Expect(node.Annotations).NotTo(HaveKey(constants.AnnotationQuarantinePrefix + ruleAName))             // Rule A key is deleted
+			Expect(node.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantinePrefix+ruleBName, "true")) // Rule B key is still there
+			Expect(node.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantined, "true"))                // Global key still there
+
+			// Clean up Rule A to prevent interference in next blocks
+			Expect(k8sClient.Delete(ctx, ruleA)).To(Succeed())
+
+			// 2. Reconcile with Rule B: should delete quarantine key B. Since no other quarantine keys remain, it should safely uncordon!
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: ruleBName, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+			Expect(node.Spec.Unschedulable).To(BeFalse())                                             // Safely uncordoned!
+			Expect(node.Annotations).NotTo(HaveKey(constants.AnnotationQuarantinePrefix + ruleBName)) // Rule B key is deleted
+			Expect(node.Annotations).NotTo(HaveKey(constants.AnnotationQuarantined))                  // Global key deleted
+
+			// Clean up Rule B
+			Expect(k8sClient.Delete(ctx, ruleB)).To(Succeed())
+		})
+	})
+
+	Describe("Node Event Predicate Filter", func() {
+		var pred nodePredicate
+
+		BeforeEach(func() {
+			pred = nodePredicate{}
+		})
+
+		It("should approve Create and Delete events unconditionally", func() {
+			Expect(pred.Create(event.CreateEvent{})).To(BeTrue())
+			Expect(pred.Delete(event.DeleteEvent{})).To(BeTrue())
+		})
+
+		It("should ignore standard Node heartbeat updates (timestamp/transition shifts)", func() {
+			oldNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+					Labels: map[string]string{
+						"role": "worker",
+					},
+				},
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{
+						{
+							Type:               corev1.NodeReady,
+							Status:             corev1.ConditionTrue,
+							LastHeartbeatTime:  metav1.Unix(100, 0),
+							LastTransitionTime: metav1.Unix(100, 0),
+						},
+					},
+				},
+			}
+
+			newNode := oldNode.DeepCopy()
+			newNode.Status.Conditions[0].LastHeartbeatTime = metav1.Unix(200, 0)
+			newNode.Status.Conditions[0].LastTransitionTime = metav1.Unix(200, 0)
+
+			updateEv := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNode,
+			}
+
+			Expect(pred.Update(updateEv)).To(BeFalse())
+		})
+
+		It("should trigger on node label or annotation changes", func() {
+			oldNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "test-node",
+					Labels: map[string]string{"role": "worker"},
+				},
+			}
+
+			newNode := oldNode.DeepCopy()
+			newNode.Labels["role"] = "database"
+
+			updateEv := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNode,
+			}
+			Expect(pred.Update(updateEv)).To(BeTrue())
+
+			// Test Annotation change
+			newNode2 := oldNode.DeepCopy()
+			newNode2.Annotations = map[string]string{"quarantine": "true"}
+			updateEv2 := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNode2,
+			}
+			Expect(pred.Update(updateEv2)).To(BeTrue())
+		})
+
+		It("should trigger when spec unschedulable (cordoning) changes", func() {
+			oldNode := &corev1.Node{
+				Spec: corev1.NodeSpec{
+					Unschedulable: false,
+				},
+			}
+			newNode := oldNode.DeepCopy()
+			newNode.Spec.Unschedulable = true
+
+			updateEv := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNode,
+			}
+			Expect(pred.Update(updateEv)).To(BeTrue())
+		})
+
+		It("should trigger when core system metadata (NodeInfo) changes", func() {
+			oldNode := &corev1.Node{
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						KubeletVersion: "v1.34.0",
+					},
+				},
+			}
+			newNode := oldNode.DeepCopy()
+			newNode.Status.NodeInfo.KubeletVersion = "v1.35.0"
+
+			updateEv := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNode,
+			}
+			Expect(pred.Update(updateEv)).To(BeTrue())
+		})
+
+		It("should trigger when a core status condition changes its boolean state", func() {
+			oldNode := &corev1.Node{
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{
+						{
+							Type:   corev1.NodeDiskPressure,
+							Status: corev1.ConditionFalse,
+						},
+					},
+				},
+			}
+			newNode := oldNode.DeepCopy()
+			newNode.Status.Conditions[0].Status = corev1.ConditionTrue
+
+			updateEv := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNode,
+			}
+			Expect(pred.Update(updateEv)).To(BeTrue())
 		})
 	})
 })

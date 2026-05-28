@@ -7,6 +7,9 @@ It helps you validate, enforce, and maintain the desired state and best practice
 - **Targeted Auditing (`nodeSelector`)**: Audits nodes selectively using standard label selectors.
 - **Rich System Metadata Validation**: Verifies node Kubelet, Container Runtime, Linux Kernel version, OS Image, and CPU Architecture.
 - **Node Health & Resource Sanity Checks**: Audits node health status conditions (e.g., `MemoryPressure`) and checks minimum allocatable capacity requirements (CPU, Memory, Storage).
+- **Scoped Multi-Rule Quarantining**: Safely manages concurrent policies. Non-compliant nodes are quarantined using namespaced labels (`quarantine.kubeorthos.io/<rule-name>`), and uncordoned only when *all* policies release their quarantine claims.
+- **API Server & Event Filtering (Heartbeat Predicates)**: Drops reconciler resource usage by >99% on idle clusters by ignoring frequent, timestamp-only Node status updates (e.g., last heartbeat) and only triggering on genuine changes to specs, key metadata, allocatable capacity, or condition statuses.
+- **Conflict-Resilient strategic JSON Patching**: Employs transactional client JSON strategic patching (`client.MergeFrom`) rather than full `Update` objects, ensuring 100% thread-safety and zero Optimistic Locking conflicts (`409 Conflict`) even when multiple rules reconcile in parallel.
 - **Detailed Reconciliation Observability**: Outputs structured trace logs specifying exactly which rule expectations are evaluated for each node.
 
 ## Getting Started
@@ -78,10 +81,10 @@ kubectl apply -f baseline.yaml
 
 3. The operator will audit only the nodes matching the label selector (or all nodes if `nodeSelector` is omitted). It will validate Kubelet, Container Runtime, Kernel version, OS image, architecture, health status conditions (e.g., MemoryPressure/DiskPressure), and hardware capacities (CPU, Memory, Storage). If `complianceLabel` or `customLabels` are defined in the CRD, it will automatically apply them to compliant targeted nodes and actively remove them from non-compliant targeted nodes.
 
-4. **Active Enforcement (Cordoning)**: If `action` is set to `Enforce`, the operator actively quarantines non-compliant targeted nodes:
-   - **Worker Nodes**: Actively cordoned (`Unschedulable = true`) and annotated with `policy.kubeorthos.io/quarantined: "true"`.
-   - **Control Plane Nodes**: Automatically excluded from active cordoning to protect cluster stability.
-   - **Remediation**: Once a cordoned node becomes compliant, the operator automatically uncordons it and removes the quarantine annotation.
+4. **Active Enforcement (Cordoning & Scoped Quarantining)**: If `action` is set to `Enforce`, the operator actively quarantines non-compliant targeted worker nodes:
+   - **Worker Nodes**: Actively cordoned (`Unschedulable = true`), annotated with `policy.kubeorthos.io/quarantined: "true"`, and stamped with a namespaced rule claim annotation: `quarantine.kubeorthos.io/<rule-name>: "true"`.
+   - **Control Plane Nodes**: Automatically excluded from active cordoning to protect cluster control plane stability.
+   - **Remediation & Reference-Counted Uncordoning**: Once a cordoned node becomes compliant, KubeOrthos releases its rule-specific quarantine claim (`quarantine.kubeorthos.io/<rule-name>`). The node is safely uncordoned and the general quarantined annotation removed **only** if no other active policies are still claiming quarantine annotations on that node. This prevents split-brain reconcile loops between overlapping rules.
 
 5. **Automated Resource Reclamation**: If `reclamation` is configured and a targeted worker node experiences `DiskPressure`, KubeOrthos dynamically triggers a node-level cleanup Job to prune unused images, delete stopped containers, and truncate large logs to actively restore the node to health.
 

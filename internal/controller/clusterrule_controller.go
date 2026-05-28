@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"reflect"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,9 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	auditv1alpha1 "kubeorthos/api/v1alpha1"
@@ -80,6 +84,8 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	originalRule := rule.DeepCopy() // Keep copy for patch updates
+
 	log.Info("Reconciling ClusterRule", "name", rule.Name, "action", rule.Spec.Action)
 
 	// List Nodes matching the selector
@@ -104,6 +110,7 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	nonCompliantNodes := []string{}
 	for _, node := range nodeList.Items {
+		originalNode := node.DeepCopy() // Keep original state for diff patching
 		isCompliant, mismatchMsg := r.auditNodeCompliance(&rule, &node)
 
 		log.Info("Audited node against ClusterRule expectations", "node", node.Name, "kubeletVersionChecked", rule.Spec.ExpectedNodeConfig.KubeletVersion != "", "containerRuntimeChecked", rule.Spec.ExpectedNodeConfig.ContainerRuntime != "", "kernelVersionChecked", rule.Spec.ExpectedNodeConfig.KernelVersion != "", "osImageChecked", rule.Spec.ExpectedNodeConfig.OSImage != "", "architectureChecked", rule.Spec.ExpectedNodeConfig.Architecture != "", "conditionsCheckedCount", len(rule.Spec.ExpectedConditions), "minimumResourcesChecked", rule.Spec.MinimumResources != nil, "isCompliant", isCompliant)
@@ -123,11 +130,11 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		labelUpdated := r.reconcileLabeling(&rule, &node, isCompliant)
 
 		if cordonUpdated || labelUpdated {
-			if err := r.Update(ctx, &node); err != nil {
-				log.Error(err, "unable to update node specs/labels/annotations", "node", node.Name)
+			if err := r.Patch(ctx, &node, client.MergeFrom(originalNode)); err != nil {
+				log.Error(err, "unable to patch node specs/labels/annotations", "node", node.Name)
 				return ctrl.Result{}, err
 			}
-			log.Info("Successfully updated node state", "node", node.Name)
+			log.Info("Successfully patched node state", "node", node.Name)
 		}
 
 		// Automated Resource Reclamation
@@ -155,8 +162,8 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	meta.SetStatusCondition(&rule.Status.Conditions, condition)
-	if err := r.Status().Update(ctx, &rule); err != nil {
-		log.Error(err, "unable to update ClusterRule status")
+	if err := r.Status().Patch(ctx, &rule, client.MergeFrom(originalRule)); err != nil {
+		log.Error(err, "unable to patch ClusterRule status")
 		return ctrl.Result{}, err
 	}
 
@@ -250,6 +257,7 @@ func (r *ClusterRuleReconciler) auditNodeCompliance(rule *auditv1alpha1.ClusterR
 // reconcileCordoning handles cordoning and uncordoning based on rule action and node compliance
 func (r *ClusterRuleReconciler) reconcileCordoning(rule *auditv1alpha1.ClusterRule, node *corev1.Node, isCompliant bool) bool {
 	nodeUpdated := false
+	ruleQuarantineKey := constants.AnnotationQuarantinePrefix + rule.Name
 
 	if rule.Spec.Action == auditv1alpha1.ActionEnforce {
 		// Check if control plane node
@@ -262,34 +270,67 @@ func (r *ClusterRuleReconciler) reconcileCordoning(rule *auditv1alpha1.ClusterRu
 		}
 
 		if !isCompliant {
-			if !node.Spec.Unschedulable {
+			if node.Annotations == nil {
+				node.Annotations = make(map[string]string)
+			}
+			hasOurQuarantine := node.Annotations[ruleQuarantineKey] == constants.ValueTrue
+			if !node.Spec.Unschedulable || !hasOurQuarantine {
 				node.Spec.Unschedulable = true
-				if node.Annotations == nil {
-					node.Annotations = make(map[string]string)
-				}
-				node.Annotations[constants.AnnotationQuarantined] = "true"
+				node.Annotations[ruleQuarantineKey] = constants.ValueTrue
+				node.Annotations[constants.AnnotationQuarantined] = constants.ValueTrue
 				nodeUpdated = true
 				r.Recorder.Eventf(rule, nil, corev1.EventTypeWarning, constants.EventReasonCordonedNode, constants.EventActionEnforcement, "Successfully cordoned non-compliant worker node %s", node.Name)
 			}
 		} else {
-			// Compliant node - check if it was quarantined by KubeOrthos
+			// Compliant node - check if it was quarantined by this rule
 			if node.Annotations != nil {
-				if _, isQuarantined := node.Annotations[constants.AnnotationQuarantined]; isQuarantined {
-					node.Spec.Unschedulable = false
-					delete(node.Annotations, constants.AnnotationQuarantined)
+				if _, isQuarantined := node.Annotations[ruleQuarantineKey]; isQuarantined {
+					delete(node.Annotations, ruleQuarantineKey)
 					nodeUpdated = true
-					r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Successfully uncordoned compliant worker node %s", node.Name)
+
+					// Check if any other rules still quarantine this node
+					hasOtherQuarantines := false
+					for k, v := range node.Annotations {
+						if strings.HasPrefix(k, constants.AnnotationQuarantinePrefix) && v == constants.ValueTrue {
+							hasOtherQuarantines = true
+							break
+						}
+					}
+
+					if !hasOtherQuarantines {
+						node.Spec.Unschedulable = false
+						delete(node.Annotations, constants.AnnotationQuarantined)
+						r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Successfully uncordoned compliant worker node %s", node.Name)
+					} else {
+						// Node remains cordoned due to other rules, but our quarantine claim is released
+						r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Released quarantine claim on worker node %s (remains cordoned by other rules)", node.Name)
+					}
 				}
 			}
 		}
 	} else {
-		// Rule is in Audit mode (or not Enforce) - lift any existing quarantines applied by KubeOrthos
+		// Rule is in Audit mode (or not Enforce) - lift our rule-specific quarantine claim if it exists
 		if node.Annotations != nil {
-			if _, isQuarantined := node.Annotations[constants.AnnotationQuarantined]; isQuarantined {
-				node.Spec.Unschedulable = false
-				delete(node.Annotations, constants.AnnotationQuarantined)
+			if _, isQuarantined := node.Annotations[ruleQuarantineKey]; isQuarantined {
+				delete(node.Annotations, ruleQuarantineKey)
 				nodeUpdated = true
-				r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Transitioned to Audit: Successfully uncordoned worker node %s", node.Name)
+
+				// Check if any other rules still quarantine this node
+				hasOtherQuarantines := false
+				for k, v := range node.Annotations {
+					if strings.HasPrefix(k, constants.AnnotationQuarantinePrefix) && v == constants.ValueTrue {
+						hasOtherQuarantines = true
+						break
+					}
+				}
+
+				if !hasOtherQuarantines {
+					node.Spec.Unschedulable = false
+					delete(node.Annotations, constants.AnnotationQuarantined)
+					r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Transitioned to Audit: Successfully uncordoned worker node %s", node.Name)
+				} else {
+					r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Transitioned to Audit: Released quarantine claim on worker node %s (remains cordoned by other rules)", node.Name)
+				}
 			}
 		}
 	}
@@ -483,7 +524,96 @@ func (r *ClusterRuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				}
 				return requests
 			}),
+			builder.WithPredicates(nodePredicate{}),
 		).
 		Named("clusterrule").
 		Complete(r)
+}
+
+// nodePredicate filters Node update events to ignore heartbeats and only trigger on relevant changes
+type nodePredicate struct {
+	predicate.Funcs
+}
+
+// Create returns true for new Node creations
+func (nodePredicate) Create(e event.CreateEvent) bool {
+	return true
+}
+
+// Delete returns true for Node deletions
+func (nodePredicate) Delete(e event.DeleteEvent) bool {
+	return true
+}
+
+// Update evaluates if the Node update is relevant to KubeOrthos auditing
+func (nodePredicate) Update(e event.UpdateEvent) bool {
+	oldNode, okOld := e.ObjectOld.(*corev1.Node)
+	newNode, okNew := e.ObjectNew.(*corev1.Node)
+	if !okOld || !okNew {
+		return false
+	}
+
+	// 1. Check labels and annotations changes
+	if !reflect.DeepEqual(oldNode.Labels, newNode.Labels) {
+		return true
+	}
+	if !reflect.DeepEqual(oldNode.Annotations, newNode.Annotations) {
+		return true
+	}
+
+	// 2. Check spec changes (e.g. cordoning)
+	if oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable {
+		return true
+	}
+
+	// 3. Check system metadata changes
+	if oldNode.Status.NodeInfo.KubeletVersion != newNode.Status.NodeInfo.KubeletVersion ||
+		oldNode.Status.NodeInfo.ContainerRuntimeVersion != newNode.Status.NodeInfo.ContainerRuntimeVersion ||
+		oldNode.Status.NodeInfo.KernelVersion != newNode.Status.NodeInfo.KernelVersion ||
+		oldNode.Status.NodeInfo.OSImage != newNode.Status.NodeInfo.OSImage ||
+		oldNode.Status.NodeInfo.Architecture != newNode.Status.NodeInfo.Architecture {
+		return true
+	}
+
+	// 4. Check core status condition changes (ignoring timestamps)
+	for _, condType := range []corev1.NodeConditionType{
+		corev1.NodeReady,
+		corev1.NodeMemoryPressure,
+		corev1.NodeDiskPressure,
+		corev1.NodePIDPressure,
+		corev1.NodeNetworkUnavailable,
+	} {
+		var oldStatus corev1.ConditionStatus
+		var newStatus corev1.ConditionStatus
+		for _, c := range oldNode.Status.Conditions {
+			if c.Type == condType {
+				oldStatus = c.Status
+				break
+			}
+		}
+		for _, c := range newNode.Status.Conditions {
+			if c.Type == condType {
+				newStatus = c.Status
+				break
+			}
+		}
+		if oldStatus != newStatus {
+			return true
+		}
+	}
+
+	// 5. Check allocatable resources changes
+	for _, resName := range []corev1.ResourceName{
+		corev1.ResourceCPU,
+		corev1.ResourceMemory,
+		corev1.ResourceEphemeralStorage,
+	} {
+		oldQty := oldNode.Status.Allocatable[resName]
+		newQty := newNode.Status.Allocatable[resName]
+		if oldQty.Cmp(newQty) != 0 {
+			return true
+		}
+	}
+
+	return false
 }

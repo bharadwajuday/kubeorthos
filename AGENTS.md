@@ -7,7 +7,9 @@
 cmd/main.go                    Manager entry (registers controllers/webhooks)
 api/<version>/*_types.go       CRD schemas (+kubebuilder markers)
 api/<version>/zz_generated.*   Auto-generated (DO NOT EDIT)
+internal/constants/constants.go Shared constants (conditions, annotations, events)
 internal/controller/*          Reconciliation logic
+internal/utils/*               Helper packages (Jobs generator, pointers)
 internal/webhook/*             Validation/defaulting (if present)
 config/crd/bases/*             Generated CRDs (DO NOT EDIT)
 config/rbac/role.yaml          Generated RBAC (DO NOT EDIT)
@@ -206,12 +208,15 @@ kubectl logs -n <project>-system deployment/<project>-controller-manager -c mana
 ```
 
 **Implementation rules:**
-- **Idempotent reconciliation**: Safe to run multiple times
-- **Re-fetch before updates**: `r.Get(ctx, req.NamespacedName, obj)` before `r.Update` to avoid conflicts
-- **Structured logging**: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
-- **Owner references**: Enable automatic garbage collection (`SetControllerReference`)
-- **Watch secondary resources**: Use `.Owns()` or `.Watches()`, not just `RequeueAfter`
-- **Finalizers**: Clean up external resources (buckets, VMs, DNS entries)
+- **Idempotent reconciliation**: Safe to run multiple times.
+- **Strategic JSON Patching**: Always use `r.Patch(ctx, obj, client.MergeFrom(original))` and `r.Status().Patch(ctx, obj, client.MergeFrom(original))` rather than standard `Update`/`Status().Update` calls. Patching prevents resource conflicts (`409 Conflict` error) and is highly critical when multiple parallel reconciles or controllers update the same resource status or spec.
+- **Node Event Predicate Filtering**: Avoid reconciliation loops caused by highly frequent secondary resource updates (e.g. Node heartbeats/leases). Implement custom watch predicates to ignore timestamp updates in status conditions, only enqueuing requests on true spec, metadata, capacity, or status changes.
+- **Scoped/Concurrent Multi-Rule Safety**: When cordoning or annotating resources that can be targeted by multiple distinct policies (like Nodes), use namespaced annotations (e.g. `quarantine.kubeorthos.io/<rule-name>`) to track ownership. Release the resource (e.g. uncordon) only when *all* policy claim annotations are absent.
+- **Shared Constants for Linter Compliance**: Never hardcode string literals for events, labels, annotations, or condition reasons in controller logic. Place them in `internal/constants/` to comply with static analysis (`goconst`) requirements.
+- **Structured logging**: `log := log.FromContext(ctx); log.Info("msg", "key", val)`.
+- **Owner references**: Enable automatic garbage collection (`SetControllerReference`).
+- **Watch secondary resources**: Use `.Owns()` or `.Watches()`, not just `RequeueAfter`.
+- **Finalizers**: Clean up external resources (buckets, VMs, DNS entries).
 
 ### Logging
 

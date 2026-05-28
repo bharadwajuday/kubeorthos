@@ -36,6 +36,12 @@ const (
 	// AnnotationQuarantined is applied to worker nodes cordoned by KubeOrthos to track operator ownership
 	AnnotationQuarantined = "policy.kubeorthos.io/quarantined"
 
+	// AnnotationQuarantinePrefix is the prefix used for scoping quarantine annotations to specific rules (e.g. quarantine.kubeorthos.io/<rule>)
+	AnnotationQuarantinePrefix = "quarantine.kubeorthos.io/"
+
+	// ValueTrue is the standard string value for "true" used in labels and annotations
+	ValueTrue = "true"
+
 	// LabelReclamationNode matches the target node name for automated resource reclamation Jobs
 	LabelReclamationNode = "policy.kubeorthos.io/reclamation-node"
 
