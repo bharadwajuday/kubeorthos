@@ -44,7 +44,77 @@ import (
 	"kubeorthos/internal/utils"
 
 	batchv1 "k8s.io/api/batch/v1"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
+
+var (
+	// NodesEvaluatedTotal tracks total node evaluations
+	NodesEvaluatedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubeorthos_nodes_evaluated_total",
+			Help: "Total number of nodes evaluated against a ClusterRule.",
+		},
+		[]string{"rule_name"},
+	)
+
+	// NodesCompliantTotal tracks total compliant nodes
+	NodesCompliantTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubeorthos_nodes_compliant_total",
+			Help: "Total number of nodes evaluated as compliant against a ClusterRule.",
+		},
+		[]string{"rule_name"},
+	)
+
+	// NodesNonCompliantTotal tracks total non-compliant nodes
+	NodesNonCompliantTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubeorthos_nodes_non_compliant_total",
+			Help: "Total number of nodes evaluated as non-compliant against a ClusterRule.",
+		},
+		[]string{"rule_name"},
+	)
+
+	// NodeQuarantineStatus tracks quarantine status per node/rule
+	NodeQuarantineStatus = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kubeorthos_node_quarantine_status",
+			Help: "Quarantine status of a node under a specific ClusterRule (1 for quarantined, 0 for not).",
+		},
+		[]string{"node", "rule_name"},
+	)
+
+	// ReclamationJobsTriggeredTotal tracks total reclamation jobs triggered
+	ReclamationJobsTriggeredTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubeorthos_reclamation_jobs_triggered_total",
+			Help: "Total number of automated reclamation jobs triggered on a node for a specific condition.",
+		},
+		[]string{"node", "condition"},
+	)
+
+	// ReclamationJobFailuresTotal tracks total reclamation job failures
+	ReclamationJobFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubeorthos_reclamation_job_failures_total",
+			Help: "Total number of automated reclamation job failures on a node.",
+		},
+		[]string{"node"},
+	)
+)
+
+func init() {
+	metrics.Registry.MustRegister(
+		NodesEvaluatedTotal,
+		NodesCompliantTotal,
+		NodesNonCompliantTotal,
+		NodeQuarantineStatus,
+		ReclamationJobsTriggeredTotal,
+		ReclamationJobFailuresTotal,
+	)
+}
 
 // ClusterRuleReconciler reconciles a ClusterRule object
 type ClusterRuleReconciler struct {
@@ -112,6 +182,14 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		originalNode := node.DeepCopy() // Keep original state for diff patching
 		isCompliant, mismatchMsg := r.auditNodeCompliance(&rule, &node)
 
+		// Increment evaluation and compliance metrics
+		NodesEvaluatedTotal.WithLabelValues(rule.Name).Inc()
+		if isCompliant {
+			NodesCompliantTotal.WithLabelValues(rule.Name).Inc()
+		} else {
+			NodesNonCompliantTotal.WithLabelValues(rule.Name).Inc()
+		}
+
 		log.Info("Audited node against ClusterRule expectations", "node", node.Name, "kubeletVersionChecked", rule.Spec.ExpectedNodeConfig.KubeletVersion != "", "containerRuntimeChecked", rule.Spec.ExpectedNodeConfig.ContainerRuntime != "", "kernelVersionChecked", rule.Spec.ExpectedNodeConfig.KernelVersion != "", "osImageChecked", rule.Spec.ExpectedNodeConfig.OSImage != "", "architectureChecked", rule.Spec.ExpectedNodeConfig.Architecture != "", "conditionsCheckedCount", len(rule.Spec.ExpectedConditions), "minimumResourcesChecked", rule.Spec.MinimumResources != nil, "isCompliant", isCompliant)
 
 		if !isCompliant {
@@ -127,6 +205,14 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		cordonUpdated := r.reconcileCordoning(&rule, &node, isCompliant)
 		labelUpdated := r.reconcileLabeling(&rule, &node, isCompliant)
+
+		// Update Node quarantine status metric based on annotation presence after reconcileCordoning
+		ruleQuarantineKey := constants.AnnotationQuarantinePrefix + rule.Name
+		if node.Annotations != nil && node.Annotations[ruleQuarantineKey] == constants.ValueTrue {
+			NodeQuarantineStatus.WithLabelValues(node.Name, rule.Name).Set(1)
+		} else {
+			NodeQuarantineStatus.WithLabelValues(node.Name, rule.Name).Set(0)
+		}
 
 		if cordonUpdated || labelUpdated {
 			if err := r.Patch(ctx, &node, client.MergeFrom(originalNode)); err != nil {
@@ -480,6 +566,7 @@ func (r *ClusterRuleReconciler) reconcileReclamation(ctx context.Context, rule *
 			log.Error(err, "unable to create reclamation job", "job", jobName)
 			return err
 		}
+		ReclamationJobsTriggeredTotal.WithLabelValues(node.Name, "DiskPressure").Inc()
 		log.Info("Triggered automated resource reclamation Job", "node", node.Name, "job", jobName)
 		r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonReclamationTriggered, constants.EventActionReclamation, "Triggered automated reclamation Job %s on node %s", jobName, node.Name)
 	} else {
@@ -497,6 +584,7 @@ func (r *ClusterRuleReconciler) reconcileReclamation(ctx context.Context, rule *
 				log.Error(err, "unable to delete failed reclamation job", "job", existingJob.Name)
 				return err
 			}
+			ReclamationJobFailuresTotal.WithLabelValues(node.Name).Inc()
 			log.Info("Automated resource reclamation failed", "node", node.Name)
 			r.Recorder.Eventf(rule, nil, corev1.EventTypeWarning, constants.EventReasonReclamationFailed, constants.EventActionReclamation, "Automated resource reclamation failed on node %s", node.Name)
 		}
