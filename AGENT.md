@@ -19,8 +19,12 @@ The application is structured following standard Go Kubernetes Operator patterns
 - **Key Concepts**: Contains the Go struct definitions for our CRDs. The primary CRD is `ClusterRule`, which is configured as a cluster-scoped (non-namespaced) resource. This protects the cluster's multi-tenancy model by restricting configuration to cluster administrators. It also enforces input parameter sanity (e.g., regex pattern validation on `LogSizeLimit`).
 
 ### 3. `internal/controller`
-- **Responsibility**: The Reconcile loops.
-- **Key Concepts**: Watches the CRDs and standard Kubernetes resources (e.g., `Node` objects). The `ClusterRuleReconciler` specifically watches `ClusterRule` objects and maps events from `Node` changes back to the `ClusterRule`s. It uses a custom Node Predicate filter to ignore highly frequent heartbeat updates and only triggers reconciliation on spec, metadata, allocatable capacity, or condition status changes. It applies strategic JSON patching (`client.MergeFrom`) to prevent lock conflicts. Direct `pods` RBAC permissions are omitted from the manager role to enforce strict Least Privilege.
+- **Responsibility**: The Reconcile loops and compliance logic.
+- **Key Concepts**:
+  - **NodeReconciler**: Reconciles `corev1.Node` resources. It fetches the node, lists all rules in the cache, audits the node against matching rules, stamps compliance tracking labels (`compliance.kubeorthos.io/<rule-name>: "true"|"false"`), and performs active enforcement (cordoning, quarantining, and disk pressure reclamation). This provides a scalable, node-centric $O(R)$ cache-lookup architecture per node event.
+  - **ClusterRuleReconciler**: Reconciles `ClusterRule` resources to update overall status conditions and metrics. It watches `Nodes`, but uses a prefix-based, label-selective map watch that *only* enqueues rule reconciles when compliance tracking labels (`compliance.kubeorthos.io/`) or quarantine annotations change, preventing global fan-out thundering herds on node status updates.
+  - **compliance.go**: Houses shared, package-level helper functions for node compliance auditing (`auditNodeCompliance`), cordoning (`reconcileCordoning`), labeling (`reconcileLabeling`), and reclamation (`reconcileReclamation`), which are invoked identically by both controllers.
+  - Applies strategic JSON patching (`client.MergeFrom`) to prevent lock conflicts. Direct `pods` RBAC permissions are omitted from the manager role to enforce strict Least Privilege.
 
 ### 4. `internal/constants`
 - **Responsibility**: Centralized Shared Constants.
@@ -34,21 +38,29 @@ The application is structured following standard Go Kubernetes Operator patterns
 - **Responsibility**: The core rule engine.
 - **Key Concepts**: Evaluates the cluster state against the rules defined in the CRDs. It identifies deviations, misconfigurations, and non-compliant resources safely.
 
-### 7. `internal/webhook` (Future Scope)
+### 7. `internal/webhook`
 - **Responsibility**: Admission controllers.
-- **Key Concepts**: Validating or Mutating webhooks to reject non-compliant resources before they are admitted into the cluster.
+- **Key Concepts**: Contains the validating admission webhook (`clusterrule_webhook.go`) that intercepts `ClusterRule` creation and update requests. It enforces syntactic and semantic constraints, such as rejecting invalid/unparseable node selectors (via `metav1.LabelSelectorAsSelector` verification) and enforcing that `expectedNodeConfig` is never empty.
 
 ## Flow of Execution
 
-1. **Initialization**: The Operator pod starts, and the Manager begins watching registered resources. The `ClusterRuleReconciler` is registered to watch `ClusterRule` and `Node` kinds.
-2. **Reconciliation Trigger**: When a `ClusterRule` is created/updated, or any watched `Node` changes, the Reconciler is triggered (via a Map function mapping Node events to all ClusterRules). The watch on `Node` resources is configured with a custom `nodePredicate` filter that ignores frequent lease/heartbeat updates (timestamp-only status changes) and only triggers on true changes to spec, key metadata, allocatable resource capacities, or key condition statuses. This drops idle reconciler events by over 99%.
-3. **Evaluation**: The Reconciler fetches all cluster `Node`s matching the `nodeSelector` (or all nodes if empty) and evaluates their specifications (Kubelet version, Container Runtime, Kernel version, OS image, CPU architecture), health status conditions, and allocatable hardware resource capacities against the rules specified in the `ClusterRule`.
-4. **Status, Event, Active Labeling, Remediation & Reclamation Update**: 
-   - If deviations are found, the Reconciler logs the non-compliance and emits warning events. If `complianceLabel` or `customLabels` are configured, it deletes these labels from the non-compliant node. If `action` is `Enforce` and the node is a worker node (not control plane), KubeOrthos actively cordons the node (`Unschedulable = true`) and adds a Namespaced Quarantine annotation: `quarantine.kubeorthos.io/<rule-name>: "true"`. It also sets `policy.kubeorthos.io/quarantined: "true"`. Control plane nodes are automatically skipped for safety.
-   - If nodes are compliant, KubeOrthos ensures the configured `complianceLabel` and `customLabels` are applied. If the node was previously cordoned/quarantined by this rule, KubeOrthos releases its namespaced quarantine claim (`quarantine.kubeorthos.io/<rule-name>`). It safely uncordons the node (`Unschedulable = false`) and removes the general quarantine annotation **only** if no other active rule claim annotations remain on the node, preventing "split-brain" uncordon loops between overlapping rules.
-   - **Automated Resource Reclamation**: If a targeted worker node experiences `DiskPressure` and the `reclamation` block is configured, the reconciler automatically spawns an ephemeral, non-privileged node-reclamation Job in the designated namespace (defaulting to `"default"`). The Job mounts host directories and executes the cleanup script utilizing strict DAC capabilities (`DAC_OVERRIDE`) instead of running in privileged root host bypass mode. The `logSizeLimit` input parameter is validated via regex patterns to prevent shell command injection. Successful and failed Jobs are automatically monitored, reported via events, and cleaned up.
-   - KubeOrthos updates the `Status` subresource (specifically the `Conditions` array) of the `ClusterRule` to report the overall compliance state (True if compliant, False if deviations exist). If no nodes match the selector, it sets a distinct `NoMatchingNodes` reason.
-   - All state modifications (node specs, labels, annotations) and CRD statuses are executed using transactional client JSON strategic patching (`client.MergeFrom`) rather than full `Update`/`Status().Update` calls, guaranteeing 100% thread safety and eliminating Optimistic Locking conflicts (`409 Conflict`) under parallel reconciliation workloads.
+1. **Initialization**: The Operator starts. The Manager configures client-side Cache Scoping for `corev1.Node` resources, matching only `kubernetes.io/os: linux` to limit memory and traffic. The `NodeReconciler` and `ClusterRuleReconciler` are registered.
+2. **Bi-Directional Reconciliation Trigger**:
+   - **NodeReconciler**: Watches `corev1.Node` updates (filtered by the heartbeat-ignoring `nodePredicate`). It also watches `ClusterRule` changes, mapping them to reconcile all nodes. When triggered, it fetches only the changing node and lists all rules in the cache.
+   - **ClusterRuleReconciler**: Watches `ClusterRule` changes directly. It also watches `corev1.Node` updates, but uses a prefix-based, label-selective map watch that *only* enqueues rule reconciles when compliance tracking labels (`compliance.kubeorthos.io/`) or quarantine annotations change, preventing global fan-out thundering herds on node status updates.
+3. **Evaluation & Enforcement (NodeReconciler)**:
+   - Checks compliance using the shared auditing function.
+   - Stamps compliance tracking labels: `compliance.kubeorthos.io/<rule-name>: "true"|"false"`.
+   - If non-compliant and `action` is `Enforce` on a worker node, cordons the node and stamps rule-specific quarantine annotations: `quarantine.kubeorthos.io/<rule-name>: "true"`.
+   - If compliant, uncordons the node and removes annotations (releasing claims), ensuring no other rules still have quarantine claims on the node.
+   - **Automated Resource Reclamation**: If a targeted worker node experiences `DiskPressure` and the `reclamation` block is configured, it automatically spawns an ephemeral, non-privileged node-reclamation Job in the designated namespace (defaulting to `"default"`).
+4. **Status & Metrics Updates (ClusterRuleReconciler)**:
+   - When enqueued (via rule modification or compliance transitions), it lists the nodes targeted by the rule.
+   - Computes overall compliance based on the compliance labels stamped on the nodes.
+   - Patches the `Status` subresource (specifically the `Conditions` array) of the `ClusterRule` to report the overall compliance state (True if compliant, False if deviations exist).
+   - Updates Prometheus metrics tracking evaluations, compliance, quarantines, and reclamation jobs.
+5. **Conflict Prevention**:
+   - All state modifications (node specs, labels, annotations) and CRD statuses are executed using transactional client JSON strategic patching (`client.MergeFrom`) rather than full `Update` calls, guaranteeing 100% thread safety and eliminating Optimistic Locking conflicts (`409 Conflict`) under parallel reconciliation workloads.
 
 ## Development Principles
 
