@@ -19,8 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
-
-	"reflect"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -129,13 +128,6 @@ type ClusterRuleReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the ClusterRule object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -199,8 +191,8 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		}
 
-		cordonUpdated := reconcileCordoning(r.Client, r.Recorder, &rule, &node, isCompliant)
-		labelUpdated := reconcileLabeling(r.Client, r.Recorder, &rule, &node, isCompliant)
+		cordonUpdated := reconcileCordoning(r.Recorder, &rule, &node, isCompliant)
+		labelUpdated := reconcileLabeling(r.Recorder, &rule, &node, isCompliant)
 
 		// Update Node quarantine status metric based on annotation presence after reconcileCordoning
 		ruleQuarantineKey := constants.AnnotationQuarantinePrefix + rule.Name
@@ -260,19 +252,28 @@ func (r *ClusterRuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// We want to trigger reconciliation for all ClusterRules when any Node changes
-				var rules auditv1alpha1.ClusterRuleList
-				if err := r.List(ctx, &rules); err != nil {
+				node, ok := obj.(*corev1.Node)
+				if !ok {
 					return nil
 				}
-				requests := make([]reconcile.Request, len(rules.Items))
-				for i, rule := range rules.Items {
-					requests[i] = reconcile.Request{
-						NamespacedName: client.ObjectKey{
-							Name:      rule.Name,
-							Namespace: rule.Namespace,
-						},
+				rulesMap := make(map[string]bool)
+				for k := range node.Labels {
+					if after, ok0 := strings.CutPrefix(k, "compliance.kubeorthos.io/"); ok0 {
+						rulesMap[after] = true
 					}
+				}
+				for k := range node.Annotations {
+					if after, ok0 := strings.CutPrefix(k, "quarantine.kubeorthos.io/"); ok0 {
+						rulesMap[after] = true
+					}
+				}
+				var requests []reconcile.Request
+				for ruleName := range rulesMap {
+					requests = append(requests, reconcile.Request{
+						NamespacedName: client.ObjectKey{
+							Name: ruleName,
+						},
+					})
 				}
 				return requests
 			}),
@@ -287,17 +288,43 @@ type nodePredicate struct {
 	predicate.Funcs
 }
 
-// Create returns true for new Node creations
+// Create returns true for Node creations if they carry compliance or quarantine labels/annotations
 func (nodePredicate) Create(e event.CreateEvent) bool {
-	return true
+	if e.Object == nil {
+		return false
+	}
+	for k := range e.Object.GetLabels() {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			return true
+		}
+	}
+	for k := range e.Object.GetAnnotations() {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			return true
+		}
+	}
+	return false
 }
 
-// Delete returns true for Node deletions
+// Delete returns true for Node deletions if they carried compliance or quarantine labels/annotations
 func (nodePredicate) Delete(e event.DeleteEvent) bool {
-	return true
+	if e.Object == nil {
+		return false
+	}
+	for k := range e.Object.GetLabels() {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			return true
+		}
+	}
+	for k := range e.Object.GetAnnotations() {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			return true
+		}
+	}
+	return false
 }
 
-// Update evaluates if the Node update is relevant to KubeOrthos auditing
+// Update evaluates if the Node update contains changes to compliance or quarantine labels/annotations
 func (nodePredicate) Update(e event.UpdateEvent) bool {
 	oldNode, okOld := e.ObjectOld.(*corev1.Node)
 	newNode, okNew := e.ObjectNew.(*corev1.Node)
@@ -305,67 +332,24 @@ func (nodePredicate) Update(e event.UpdateEvent) bool {
 		return false
 	}
 
-	// 1. Check labels and annotations changes
-	if !reflect.DeepEqual(oldNode.Labels, newNode.Labels) {
-		return true
-	}
-	if !reflect.DeepEqual(oldNode.Annotations, newNode.Annotations) {
-		return true
-	}
+	return hasSelectivePrefixChange(oldNode.Labels, newNode.Labels) ||
+		hasSelectivePrefixChange(oldNode.Annotations, newNode.Annotations)
+}
 
-	// 2. Check spec changes (e.g. cordoning)
-	if oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable {
-		return true
-	}
-
-	// 3. Check system metadata changes
-	if oldNode.Status.NodeInfo.KubeletVersion != newNode.Status.NodeInfo.KubeletVersion ||
-		oldNode.Status.NodeInfo.ContainerRuntimeVersion != newNode.Status.NodeInfo.ContainerRuntimeVersion ||
-		oldNode.Status.NodeInfo.KernelVersion != newNode.Status.NodeInfo.KernelVersion ||
-		oldNode.Status.NodeInfo.OSImage != newNode.Status.NodeInfo.OSImage ||
-		oldNode.Status.NodeInfo.Architecture != newNode.Status.NodeInfo.Architecture {
-		return true
-	}
-
-	// 4. Check core status condition changes (ignoring timestamps)
-	for _, condType := range []corev1.NodeConditionType{
-		corev1.NodeReady,
-		corev1.NodeMemoryPressure,
-		corev1.NodeDiskPressure,
-		corev1.NodePIDPressure,
-		corev1.NodeNetworkUnavailable,
-	} {
-		var oldStatus corev1.ConditionStatus
-		var newStatus corev1.ConditionStatus
-		for _, c := range oldNode.Status.Conditions {
-			if c.Type == condType {
-				oldStatus = c.Status
-				break
+func hasSelectivePrefixChange(oldMap, newMap map[string]string) bool {
+	for k, v := range newMap {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			if oldVal, exists := oldMap[k]; !exists || oldVal != v {
+				return true
 			}
 		}
-		for _, c := range newNode.Status.Conditions {
-			if c.Type == condType {
-				newStatus = c.Status
-				break
+	}
+	for k := range oldMap {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			if _, exists := newMap[k]; !exists {
+				return true
 			}
 		}
-		if oldStatus != newStatus {
-			return true
-		}
 	}
-
-	// 5. Check allocatable resources changes
-	for _, resName := range []corev1.ResourceName{
-		corev1.ResourceCPU,
-		corev1.ResourceMemory,
-		corev1.ResourceEphemeralStorage,
-	} {
-		oldQty := oldNode.Status.Allocatable[resName]
-		newQty := newNode.Status.Allocatable[resName]
-		if oldQty.Cmp(newQty) != 0 {
-			return true
-		}
-	}
-
 	return false
 }
