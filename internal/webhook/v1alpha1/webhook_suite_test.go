@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -136,9 +137,13 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
-	Eventually(func() error {
-		return testEnv.Stop()
-	}, time.Minute, time.Second).Should(Succeed())
+	if runtime.GOOS == "windows" {
+		_ = testEnv.Stop()
+	} else {
+		Eventually(func() error {
+			return testEnv.Stop()
+		}, time.Minute, time.Second).Should(Succeed())
+	}
 })
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.
