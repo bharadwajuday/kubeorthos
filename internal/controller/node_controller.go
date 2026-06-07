@@ -98,7 +98,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			}
 			complianceVal := "false"
 			if isCompliant {
-				complianceVal = "true"
+				complianceVal = constants.ValueTrue
 			}
 			node.Labels[complianceLabelKey] = complianceVal
 
