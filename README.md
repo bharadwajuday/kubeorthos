@@ -4,6 +4,7 @@ KubeOrthos is a Kubernetes Operator designed to ensure cluster-wide configuratio
 It helps you validate, enforce, and maintain the desired state and best practices across your entire cluster configuration using Custom Resource Definitions (CRDs).
 
 ## Features
+- **Bi-Directional Reconcile Loops (ClusterRule & Node Controllers)**: In addition to the primary `ClusterRule` controller, a dedicated `Node` controller reconciles `Node` resources, listing rules and evaluating node compliance in real-time. This guarantees immediate enforcement and compliance stamping upon node updates, join events, or status changes, with all evaluations using optimized watch predicates.
 - **Targeted Auditing (`nodeSelector`)**: Audits nodes selectively using standard label selectors.
 - **Rich System Metadata Validation**: Verifies node Kubelet, Container Runtime, Linux Kernel version, OS Image, and CPU Architecture.
 - **Node Health & Resource Sanity Checks**: Audits node health status conditions (e.g., `MemoryPressure`) and checks minimum allocatable capacity requirements (CPU, Memory, Storage).

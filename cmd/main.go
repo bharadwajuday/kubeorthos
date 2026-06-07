@@ -187,6 +187,16 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "clusterrule")
 		os.Exit(1)
 	}
+
+	if err := (&controller.NodeReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("node-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "node")
+		os.Exit(1)
+	}
+
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
 		if err := webhookv1alpha1.SetupClusterRuleWebhookWithManager(mgr); err != nil {
