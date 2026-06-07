@@ -34,11 +34,7 @@ import (
 )
 
 // auditNodeCompliance checks if a node complies with the expectations of the ClusterRule
-<<<<<<< HEAD
 func auditNodeCompliance(rule *auditv1alpha1.ClusterRule, node *corev1.Node) (bool, string) {
-=======
-func auditNodeCompliance(c client.Client, recorder events.EventRecorder, rule *auditv1alpha1.ClusterRule, node *corev1.Node) (bool, string) { //nolint:unparam
->>>>>>> task-rule-controller
 	isCompliant := true
 	var mismatchMsg strings.Builder
 
@@ -120,11 +116,7 @@ func auditNodeCompliance(c client.Client, recorder events.EventRecorder, rule *a
 }
 
 // reconcileCordoning handles cordoning and uncordoning based on rule action and node compliance
-<<<<<<< HEAD
 func reconcileCordoning(recorder events.EventRecorder, rule *auditv1alpha1.ClusterRule, node *corev1.Node, isCompliant bool) bool {
-=======
-func reconcileCordoning(c client.Client, recorder events.EventRecorder, rule *auditv1alpha1.ClusterRule, node *corev1.Node, isCompliant bool) bool { //nolint:unparam
->>>>>>> task-rule-controller
 	nodeUpdated := false
 	ruleQuarantineKey := constants.AnnotationQuarantinePrefix + rule.Name
 
@@ -208,11 +200,7 @@ func reconcileCordoning(c client.Client, recorder events.EventRecorder, rule *au
 }
 
 // reconcileLabeling applies or removes compliance/custom labels on the node
-<<<<<<< HEAD
 func reconcileLabeling(recorder events.EventRecorder, rule *auditv1alpha1.ClusterRule, node *corev1.Node, isCompliant bool) bool {
-=======
-func reconcileLabeling(c client.Client, recorder events.EventRecorder, rule *auditv1alpha1.ClusterRule, node *corev1.Node, isCompliant bool) bool { //nolint:unparam
->>>>>>> task-rule-controller
 	nodeUpdated := false
 
 	if rule.Spec.ComplianceLabel == nil && len(rule.Spec.CustomLabels) == 0 {
