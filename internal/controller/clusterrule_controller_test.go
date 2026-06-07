@@ -813,18 +813,45 @@ var _ = Describe("ClusterRule Controller", func() {
 			pred = nodePredicate{}
 		})
 
-		It("should approve Create and Delete events unconditionally", func() {
-			Expect(pred.Create(event.CreateEvent{})).To(BeTrue())
-			Expect(pred.Delete(event.DeleteEvent{})).To(BeTrue())
+		It("should approve Create and Delete events only if they carry compliance or quarantine labels/annotations", func() {
+			// Without compliance/quarantine labels/annotations
+			nodeEmpty := &corev1.Node{}
+			Expect(pred.Create(event.CreateEvent{Object: nodeEmpty})).To(BeFalse())
+			Expect(pred.Delete(event.DeleteEvent{Object: nodeEmpty})).To(BeFalse())
+
+			// With compliance label
+			nodeCompliance := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"compliance.kubeorthos.io/rule-a": "true",
+					},
+				},
+			}
+			Expect(pred.Create(event.CreateEvent{Object: nodeCompliance})).To(BeTrue())
+			Expect(pred.Delete(event.DeleteEvent{Object: nodeCompliance})).To(BeTrue())
+
+			// With quarantine annotation
+			nodeQuarantine := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"quarantine.kubeorthos.io/rule-b": "true",
+					},
+				},
+			}
+			Expect(pred.Create(event.CreateEvent{Object: nodeQuarantine})).To(BeTrue())
+			Expect(pred.Delete(event.DeleteEvent{Object: nodeQuarantine})).To(BeTrue())
 		})
 
-		It("should ignore standard Node heartbeat updates (timestamp/transition shifts)", func() {
+		It("should ignore standard Node heartbeat updates and other unrelated changes", func() {
 			oldNode := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-node",
 					Labels: map[string]string{
 						"role": "worker",
 					},
+				},
+				Spec: corev1.NodeSpec{
+					Unschedulable: false,
 				},
 				Status: corev1.NodeStatus{
 					Conditions: []corev1.NodeCondition{
@@ -835,101 +862,64 @@ var _ = Describe("ClusterRule Controller", func() {
 							LastTransitionTime: metav1.Unix(100, 0),
 						},
 					},
-				},
-			}
-
-			newNode := oldNode.DeepCopy()
-			newNode.Status.Conditions[0].LastHeartbeatTime = metav1.Unix(200, 0)
-			newNode.Status.Conditions[0].LastTransitionTime = metav1.Unix(200, 0)
-
-			updateEv := event.UpdateEvent{
-				ObjectOld: oldNode,
-				ObjectNew: newNode,
-			}
-
-			Expect(pred.Update(updateEv)).To(BeFalse())
-		})
-
-		It("should trigger on node label or annotation changes", func() {
-			oldNode := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "test-node",
-					Labels: map[string]string{"role": "worker"},
-				},
-			}
-
-			newNode := oldNode.DeepCopy()
-			newNode.Labels["role"] = "database"
-
-			updateEv := event.UpdateEvent{
-				ObjectOld: oldNode,
-				ObjectNew: newNode,
-			}
-			Expect(pred.Update(updateEv)).To(BeTrue())
-
-			// Test Annotation change
-			newNode2 := oldNode.DeepCopy()
-			newNode2.Annotations = map[string]string{"quarantine": "true"}
-			updateEv2 := event.UpdateEvent{
-				ObjectOld: oldNode,
-				ObjectNew: newNode2,
-			}
-			Expect(pred.Update(updateEv2)).To(BeTrue())
-		})
-
-		It("should trigger when spec unschedulable (cordoning) changes", func() {
-			oldNode := &corev1.Node{
-				Spec: corev1.NodeSpec{
-					Unschedulable: false,
-				},
-			}
-			newNode := oldNode.DeepCopy()
-			newNode.Spec.Unschedulable = true
-
-			updateEv := event.UpdateEvent{
-				ObjectOld: oldNode,
-				ObjectNew: newNode,
-			}
-			Expect(pred.Update(updateEv)).To(BeTrue())
-		})
-
-		It("should trigger when core system metadata (NodeInfo) changes", func() {
-			oldNode := &corev1.Node{
-				Status: corev1.NodeStatus{
 					NodeInfo: corev1.NodeSystemInfo{
 						KubeletVersion: "v1.34.0",
 					},
 				},
 			}
-			newNode := oldNode.DeepCopy()
-			newNode.Status.NodeInfo.KubeletVersion = "v1.35.0"
 
-			updateEv := event.UpdateEvent{
-				ObjectOld: oldNode,
-				ObjectNew: newNode,
-			}
-			Expect(pred.Update(updateEv)).To(BeTrue())
+			// Heartbeat change
+			newNode := oldNode.DeepCopy()
+			newNode.Status.Conditions[0].LastHeartbeatTime = metav1.Unix(200, 0)
+			newNode.Status.Conditions[0].LastTransitionTime = metav1.Unix(200, 0)
+
+			Expect(pred.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode})).To(BeFalse())
+
+			// Cordoning change
+			newNode2 := oldNode.DeepCopy()
+			newNode2.Spec.Unschedulable = true
+			Expect(pred.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode2})).To(BeFalse())
+
+			// KubeletVersion change
+			newNode3 := oldNode.DeepCopy()
+			newNode3.Status.NodeInfo.KubeletVersion = "v1.35.0"
+			Expect(pred.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode3})).To(BeFalse())
+
+			// Unrelated label change
+			newNode4 := oldNode.DeepCopy()
+			newNode4.Labels["role"] = "master"
+			Expect(pred.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode4})).To(BeFalse())
 		})
 
-		It("should trigger when a core status condition changes its boolean state", func() {
+		It("should trigger on compliance or quarantine label/annotation changes", func() {
 			oldNode := &corev1.Node{
-				Status: corev1.NodeStatus{
-					Conditions: []corev1.NodeCondition{
-						{
-							Type:   corev1.NodeDiskPressure,
-							Status: corev1.ConditionFalse,
-						},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+					Labels: map[string]string{
+						"role": "worker",
 					},
 				},
 			}
-			newNode := oldNode.DeepCopy()
-			newNode.Status.Conditions[0].Status = corev1.ConditionTrue
 
-			updateEv := event.UpdateEvent{
-				ObjectOld: oldNode,
-				ObjectNew: newNode,
+			// Add compliance label
+			newNode1 := oldNode.DeepCopy()
+			newNode1.Labels["compliance.kubeorthos.io/rule-a"] = "true"
+			Expect(pred.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode1})).To(BeTrue())
+
+			// Modify compliance label value
+			newNode2 := newNode1.DeepCopy()
+			newNode2.Labels["compliance.kubeorthos.io/rule-a"] = "false"
+			Expect(pred.Update(event.UpdateEvent{ObjectOld: newNode1, ObjectNew: newNode2})).To(BeTrue())
+
+			// Delete compliance label
+			Expect(pred.Update(event.UpdateEvent{ObjectOld: newNode1, ObjectNew: oldNode})).To(BeTrue())
+
+			// Add quarantine annotation
+			newNode3 := oldNode.DeepCopy()
+			newNode3.Annotations = map[string]string{
+				"quarantine.kubeorthos.io/rule-b": "true",
 			}
-			Expect(pred.Update(updateEv)).To(BeTrue())
+			Expect(pred.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode3})).To(BeTrue())
 		})
 	})
 

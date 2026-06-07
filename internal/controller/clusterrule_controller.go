@@ -19,8 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-
-	"reflect"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -41,9 +39,6 @@ import (
 
 	auditv1alpha1 "kubeorthos/api/v1alpha1"
 	"kubeorthos/internal/constants"
-	"kubeorthos/internal/utils"
-
-	batchv1 "k8s.io/api/batch/v1"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -133,13 +128,6 @@ type ClusterRuleReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the ClusterRule object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -180,7 +168,7 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	nonCompliantNodes := []string{}
 	for _, node := range nodeList.Items {
 		originalNode := node.DeepCopy() // Keep original state for diff patching
-		isCompliant, mismatchMsg := r.auditNodeCompliance(&rule, &node)
+		isCompliant, mismatchMsg := auditNodeCompliance(r.Client, r.Recorder, &rule, &node)
 
 		// Increment evaluation and compliance metrics
 		NodesEvaluatedTotal.WithLabelValues(rule.Name).Inc()
@@ -203,8 +191,8 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		}
 
-		cordonUpdated := r.reconcileCordoning(&rule, &node, isCompliant)
-		labelUpdated := r.reconcileLabeling(&rule, &node, isCompliant)
+		cordonUpdated := reconcileCordoning(r.Client, r.Recorder, &rule, &node, isCompliant)
+		labelUpdated := reconcileLabeling(r.Client, r.Recorder, &rule, &node, isCompliant)
 
 		// Update Node quarantine status metric based on annotation presence after reconcileCordoning
 		ruleQuarantineKey := constants.AnnotationQuarantinePrefix + rule.Name
@@ -223,7 +211,7 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		// Automated Resource Reclamation
-		if err := r.reconcileReclamation(ctx, &rule, &node); err != nil {
+		if err := reconcileReclamation(ctx, r.Client, r.Recorder, &rule, &node); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -257,342 +245,6 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
-// auditNodeCompliance checks if a node complies with the expectations of the ClusterRule
-func (r *ClusterRuleReconciler) auditNodeCompliance(rule *auditv1alpha1.ClusterRule, node *corev1.Node) (bool, string) {
-	isCompliant := true
-	var mismatchMsg strings.Builder
-
-	// Check KubeletVersion
-	if rule.Spec.ExpectedNodeConfig.KubeletVersion != "" && node.Status.NodeInfo.KubeletVersion != rule.Spec.ExpectedNodeConfig.KubeletVersion {
-		isCompliant = false
-		mismatchMsg.WriteString(fmt.Sprintf("KubeletVersion mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.KubeletVersion, node.Status.NodeInfo.KubeletVersion))
-	}
-
-	// Check ContainerRuntime
-	if rule.Spec.ExpectedNodeConfig.ContainerRuntime != "" && node.Status.NodeInfo.ContainerRuntimeVersion != rule.Spec.ExpectedNodeConfig.ContainerRuntime {
-		isCompliant = false
-		mismatchMsg.WriteString(fmt.Sprintf("ContainerRuntime mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.ContainerRuntime, node.Status.NodeInfo.ContainerRuntimeVersion))
-	}
-
-	// Check KernelVersion
-	if rule.Spec.ExpectedNodeConfig.KernelVersion != "" && node.Status.NodeInfo.KernelVersion != rule.Spec.ExpectedNodeConfig.KernelVersion {
-		isCompliant = false
-		mismatchMsg.WriteString(fmt.Sprintf("KernelVersion mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.KernelVersion, node.Status.NodeInfo.KernelVersion))
-	}
-
-	// Check OSImage
-	if rule.Spec.ExpectedNodeConfig.OSImage != "" && node.Status.NodeInfo.OSImage != rule.Spec.ExpectedNodeConfig.OSImage {
-		isCompliant = false
-		mismatchMsg.WriteString(fmt.Sprintf("OSImage mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.OSImage, node.Status.NodeInfo.OSImage))
-	}
-
-	// Check Architecture
-	if rule.Spec.ExpectedNodeConfig.Architecture != "" && node.Status.NodeInfo.Architecture != rule.Spec.ExpectedNodeConfig.Architecture {
-		isCompliant = false
-		mismatchMsg.WriteString(fmt.Sprintf("Architecture mismatch: expected %s, got %s. ", rule.Spec.ExpectedNodeConfig.Architecture, node.Status.NodeInfo.Architecture))
-	}
-
-	// Check ExpectedConditions
-	for _, reqCond := range rule.Spec.ExpectedConditions {
-		var found bool
-		for _, nodeCond := range node.Status.Conditions {
-			if nodeCond.Type == reqCond.Type {
-				found = true
-				if nodeCond.Status != reqCond.Status {
-					isCompliant = false
-					mismatchMsg.WriteString(fmt.Sprintf("Node Condition %s is %s, expected %s. ", reqCond.Type, nodeCond.Status, reqCond.Status))
-				}
-				break
-			}
-		}
-		if !found {
-			isCompliant = false
-			mismatchMsg.WriteString(fmt.Sprintf("Node Condition %s is missing, expected %s. ", reqCond.Type, reqCond.Status))
-		}
-	}
-
-	// Check MinimumResources
-	if rule.Spec.MinimumResources != nil {
-		if rule.Spec.MinimumResources.CPU != nil {
-			actualCPU := node.Status.Allocatable[corev1.ResourceCPU]
-			if actualCPU.Cmp(*rule.Spec.MinimumResources.CPU) < 0 {
-				isCompliant = false
-				mismatchMsg.WriteString(fmt.Sprintf("Allocatable CPU is insufficient: expected %s, got %s. ", rule.Spec.MinimumResources.CPU.String(), actualCPU.String()))
-			}
-		}
-		if rule.Spec.MinimumResources.Memory != nil {
-			actualMemory := node.Status.Allocatable[corev1.ResourceMemory]
-			if actualMemory.Cmp(*rule.Spec.MinimumResources.Memory) < 0 {
-				isCompliant = false
-				mismatchMsg.WriteString(fmt.Sprintf("Allocatable Memory is insufficient: expected %s, got %s. ", rule.Spec.MinimumResources.Memory.String(), actualMemory.String()))
-			}
-		}
-		if rule.Spec.MinimumResources.Storage != nil {
-			actualStorage := node.Status.Allocatable[corev1.ResourceEphemeralStorage]
-			if actualStorage.Cmp(*rule.Spec.MinimumResources.Storage) < 0 {
-				isCompliant = false
-				mismatchMsg.WriteString(fmt.Sprintf("Allocatable Ephemeral Storage is insufficient: expected %s, got %s. ", rule.Spec.MinimumResources.Storage.String(), actualStorage.String()))
-			}
-		}
-	}
-
-	return isCompliant, mismatchMsg.String()
-}
-
-// reconcileCordoning handles cordoning and uncordoning based on rule action and node compliance
-func (r *ClusterRuleReconciler) reconcileCordoning(rule *auditv1alpha1.ClusterRule, node *corev1.Node, isCompliant bool) bool {
-	nodeUpdated := false
-	ruleQuarantineKey := constants.AnnotationQuarantinePrefix + rule.Name
-
-	if rule.Spec.Action == auditv1alpha1.ActionEnforce {
-		// Check if control plane node
-		_, isCP := node.Labels[constants.LabelNodeRoleControlPlane]
-		_, isMaster := node.Labels[constants.LabelNodeRoleMaster]
-		isControlPlane := isCP || isMaster
-
-		if isControlPlane {
-			return false
-		}
-
-		if !isCompliant {
-			if node.Annotations == nil {
-				node.Annotations = make(map[string]string)
-			}
-			hasOurQuarantine := node.Annotations[ruleQuarantineKey] == constants.ValueTrue
-			if !node.Spec.Unschedulable || !hasOurQuarantine {
-				node.Spec.Unschedulable = true
-				node.Annotations[ruleQuarantineKey] = constants.ValueTrue
-				node.Annotations[constants.AnnotationQuarantined] = constants.ValueTrue
-				nodeUpdated = true
-				r.Recorder.Eventf(rule, nil, corev1.EventTypeWarning, constants.EventReasonCordonedNode, constants.EventActionEnforcement, "Successfully cordoned non-compliant worker node %s", node.Name)
-			}
-		} else {
-			// Compliant node - check if it was quarantined by this rule
-			if node.Annotations != nil {
-				if _, isQuarantined := node.Annotations[ruleQuarantineKey]; isQuarantined {
-					delete(node.Annotations, ruleQuarantineKey)
-					nodeUpdated = true
-
-					// Check if any other rules still quarantine this node
-					hasOtherQuarantines := false
-					for k, v := range node.Annotations {
-						if strings.HasPrefix(k, constants.AnnotationQuarantinePrefix) && v == constants.ValueTrue {
-							hasOtherQuarantines = true
-							break
-						}
-					}
-
-					if !hasOtherQuarantines {
-						node.Spec.Unschedulable = false
-						delete(node.Annotations, constants.AnnotationQuarantined)
-						r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Successfully uncordoned compliant worker node %s", node.Name)
-					} else {
-						// Node remains cordoned due to other rules, but our quarantine claim is released
-						r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Released quarantine claim on worker node %s (remains cordoned by other rules)", node.Name)
-					}
-				}
-			}
-		}
-	} else {
-		// Rule is in Audit mode (or not Enforce) - lift our rule-specific quarantine claim if it exists
-		if node.Annotations != nil {
-			if _, isQuarantined := node.Annotations[ruleQuarantineKey]; isQuarantined {
-				delete(node.Annotations, ruleQuarantineKey)
-				nodeUpdated = true
-
-				// Check if any other rules still quarantine this node
-				hasOtherQuarantines := false
-				for k, v := range node.Annotations {
-					if strings.HasPrefix(k, constants.AnnotationQuarantinePrefix) && v == constants.ValueTrue {
-						hasOtherQuarantines = true
-						break
-					}
-				}
-
-				if !hasOtherQuarantines {
-					node.Spec.Unschedulable = false
-					delete(node.Annotations, constants.AnnotationQuarantined)
-					r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Transitioned to Audit: Successfully uncordoned worker node %s", node.Name)
-				} else {
-					r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonUncordonedNode, constants.EventActionEnforcement, "Transitioned to Audit: Released quarantine claim on worker node %s (remains cordoned by other rules)", node.Name)
-				}
-			}
-		}
-	}
-
-	return nodeUpdated
-}
-
-// reconcileLabeling applies or removes compliance/custom labels on the node
-func (r *ClusterRuleReconciler) reconcileLabeling(rule *auditv1alpha1.ClusterRule, node *corev1.Node, isCompliant bool) bool {
-	nodeUpdated := false
-
-	if rule.Spec.ComplianceLabel == nil && len(rule.Spec.CustomLabels) == 0 {
-		return false
-	}
-
-	nodeLabels := node.GetLabels()
-	if nodeLabels == nil {
-		nodeLabels = make(map[string]string)
-	}
-
-	if isCompliant {
-		// Node is compliant, ensure compliance label is applied
-		if rule.Spec.ComplianceLabel != nil {
-			labelKey := rule.Spec.ComplianceLabel.Key
-			labelValue := rule.Spec.ComplianceLabel.Value
-			if val, exists := nodeLabels[labelKey]; !exists || val != labelValue {
-				nodeLabels[labelKey] = labelValue
-				nodeUpdated = true
-				r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonComplianceLabelApplied, constants.EventActionComplianceLabel, "Successfully applied label %s=%s to node %s", labelKey, labelValue, node.Name)
-			}
-		}
-		// Node is compliant, ensure custom labels are applied
-		for k, v := range rule.Spec.CustomLabels {
-			if val, exists := nodeLabels[k]; !exists || val != v {
-				nodeLabels[k] = v
-				nodeUpdated = true
-				r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonCustomLabelApplied, constants.EventActionComplianceLabel, "Successfully applied custom label %s=%s to node %s", k, v, node.Name)
-			}
-		}
-	} else {
-		// Node is non-compliant, ensure compliance label is removed
-		if rule.Spec.ComplianceLabel != nil {
-			labelKey := rule.Spec.ComplianceLabel.Key
-			if _, exists := nodeLabels[labelKey]; exists {
-				delete(nodeLabels, labelKey)
-				nodeUpdated = true
-				r.Recorder.Eventf(rule, nil, corev1.EventTypeWarning, constants.EventReasonComplianceLabelRemoved, constants.EventActionComplianceLabel, "Successfully removed label %s from non-compliant node %s", labelKey, node.Name)
-			}
-		}
-		// Node is non-compliant, ensure custom labels are removed
-		for k := range rule.Spec.CustomLabels {
-			if _, exists := nodeLabels[k]; exists {
-				delete(nodeLabels, k)
-				nodeUpdated = true
-				r.Recorder.Eventf(rule, nil, corev1.EventTypeWarning, constants.EventReasonCustomLabelRemoved, constants.EventActionComplianceLabel, "Successfully removed custom label %s from non-compliant node %s", k, node.Name)
-			}
-		}
-	}
-
-	if nodeUpdated {
-		node.SetLabels(nodeLabels)
-	}
-
-	return nodeUpdated
-}
-
-// reconcileReclamation checks for Node disk pressure and spawns/manages resource reclamation Jobs
-func (r *ClusterRuleReconciler) reconcileReclamation(ctx context.Context, rule *auditv1alpha1.ClusterRule, node *corev1.Node) error {
-	log := logf.FromContext(ctx)
-
-	if rule.Spec.Reclamation == nil || rule.Spec.Reclamation.DiskPressure == nil {
-		return nil
-	}
-
-	hasDiskPressure := false
-	for _, cond := range node.Status.Conditions {
-		if cond.Type == corev1.NodeDiskPressure && cond.Status == corev1.ConditionTrue {
-			hasDiskPressure = true
-			break
-		}
-	}
-
-	if !hasDiskPressure {
-		return nil
-	}
-
-	jobNamespace := rule.Namespace
-	if jobNamespace == "" {
-		jobNamespace = "default"
-	}
-
-	jobList := &batchv1.JobList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		constants.LabelReclamationNode: node.Name,
-		constants.LabelClusterRule:     rule.Name,
-	})
-	if err := r.List(ctx, jobList, client.InNamespace(jobNamespace), client.MatchingLabelsSelector{Selector: labelSelector}); err != nil {
-		log.Error(err, "unable to list reclamation jobs", "node", node.Name)
-		return err
-	}
-
-	if len(jobList.Items) == 0 {
-		safeNodeName := strings.ReplaceAll(node.Name, ".", "-")
-		jobName := fmt.Sprintf("reclaim-%s-%s", rule.Name, safeNodeName)
-		if len(jobName) > 63 {
-			jobName = jobName[:63]
-		}
-
-		jobLabels := map[string]string{
-			constants.LabelReclamationNode: node.Name,
-			constants.LabelClusterRule:     rule.Name,
-		}
-
-		cleanImages := true
-		if rule.Spec.Reclamation.DiskPressure.CleanImages != nil {
-			cleanImages = *rule.Spec.Reclamation.DiskPressure.CleanImages
-		}
-		cleanContainers := true
-		if rule.Spec.Reclamation.DiskPressure.CleanContainers != nil {
-			cleanContainers = *rule.Spec.Reclamation.DiskPressure.CleanContainers
-		}
-		cleanLogs := false
-		if rule.Spec.Reclamation.DiskPressure.CleanLogs != nil {
-			cleanLogs = *rule.Spec.Reclamation.DiskPressure.CleanLogs
-		}
-		logSizeLimit := constants.DefaultLogSizeLimit
-		if rule.Spec.Reclamation.DiskPressure.LogSizeLimit != "" {
-			logSizeLimit = rule.Spec.Reclamation.DiskPressure.LogSizeLimit
-		}
-
-		script := "#!/bin/sh\nset -ex\n"
-		if cleanImages {
-			script += "echo 'Pruning containerd images...'\n"
-			script += "crictl rmi --prune || true\n"
-		}
-		if cleanContainers {
-			script += "echo 'Pruning stopped containers...'\n"
-			script += "crictl rm $(crictl ps -a -q) || true\n"
-		}
-		if cleanLogs {
-			script += "echo 'Truncating large logs...'\n"
-			script += fmt.Sprintf("find /host/var/log/pods -type f -name '*.log' -size +%s -exec truncate -s 0 {} \\;\n", logSizeLimit)
-		}
-
-		job := utils.NewReclamationJob(jobName, jobNamespace, node.Name, script, jobLabels)
-
-		if err := r.Create(ctx, job); err != nil {
-			log.Error(err, "unable to create reclamation job", "job", jobName)
-			return err
-		}
-		ReclamationJobsTriggeredTotal.WithLabelValues(node.Name, "DiskPressure").Inc()
-		log.Info("Triggered automated resource reclamation Job", "node", node.Name, "job", jobName)
-		r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonReclamationTriggered, constants.EventActionReclamation, "Triggered automated reclamation Job %s on node %s", jobName, node.Name)
-	} else {
-		// Check active Job status
-		existingJob := &jobList.Items[0]
-		if existingJob.Status.Succeeded > 0 {
-			if err := r.Delete(ctx, existingJob); err != nil {
-				log.Error(err, "unable to delete succeeded reclamation job", "job", existingJob.Name)
-				return err
-			}
-			log.Info("Automated resource reclamation completed successfully", "node", node.Name)
-			r.Recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonReclamationCompleted, constants.EventActionReclamation, "Automated resource reclamation completed successfully on node %s", node.Name)
-		} else if existingJob.Status.Failed > 0 {
-			if err := r.Delete(ctx, existingJob); err != nil {
-				log.Error(err, "unable to delete failed reclamation job", "job", existingJob.Name)
-				return err
-			}
-			ReclamationJobFailuresTotal.WithLabelValues(node.Name).Inc()
-			log.Info("Automated resource reclamation failed", "node", node.Name)
-			r.Recorder.Eventf(rule, nil, corev1.EventTypeWarning, constants.EventReasonReclamationFailed, constants.EventActionReclamation, "Automated resource reclamation failed on node %s", node.Name)
-		}
-	}
-
-	return nil
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *ClusterRuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -600,19 +252,28 @@ func (r *ClusterRuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// We want to trigger reconciliation for all ClusterRules when any Node changes
-				var rules auditv1alpha1.ClusterRuleList
-				if err := r.List(ctx, &rules); err != nil {
+				node, ok := obj.(*corev1.Node)
+				if !ok {
 					return nil
 				}
-				requests := make([]reconcile.Request, len(rules.Items))
-				for i, rule := range rules.Items {
-					requests[i] = reconcile.Request{
-						NamespacedName: client.ObjectKey{
-							Name:      rule.Name,
-							Namespace: rule.Namespace,
-						},
+				rulesMap := make(map[string]bool)
+				for k := range node.Labels {
+					if after, ok0 := strings.CutPrefix(k, "compliance.kubeorthos.io/"); ok0 {
+						rulesMap[after] = true
 					}
+				}
+				for k := range node.Annotations {
+					if after, ok0 := strings.CutPrefix(k, "quarantine.kubeorthos.io/"); ok0 {
+						rulesMap[after] = true
+					}
+				}
+				var requests []reconcile.Request
+				for ruleName := range rulesMap {
+					requests = append(requests, reconcile.Request{
+						NamespacedName: client.ObjectKey{
+							Name: ruleName,
+						},
+					})
 				}
 				return requests
 			}),
@@ -627,17 +288,43 @@ type nodePredicate struct {
 	predicate.Funcs
 }
 
-// Create returns true for new Node creations
+// Create returns true for Node creations if they carry compliance or quarantine labels/annotations
 func (nodePredicate) Create(e event.CreateEvent) bool {
-	return true
+	if e.Object == nil {
+		return false
+	}
+	for k := range e.Object.GetLabels() {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			return true
+		}
+	}
+	for k := range e.Object.GetAnnotations() {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			return true
+		}
+	}
+	return false
 }
 
-// Delete returns true for Node deletions
+// Delete returns true for Node deletions if they carried compliance or quarantine labels/annotations
 func (nodePredicate) Delete(e event.DeleteEvent) bool {
-	return true
+	if e.Object == nil {
+		return false
+	}
+	for k := range e.Object.GetLabels() {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			return true
+		}
+	}
+	for k := range e.Object.GetAnnotations() {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			return true
+		}
+	}
+	return false
 }
 
-// Update evaluates if the Node update is relevant to KubeOrthos auditing
+// Update evaluates if the Node update contains changes to compliance or quarantine labels/annotations
 func (nodePredicate) Update(e event.UpdateEvent) bool {
 	oldNode, okOld := e.ObjectOld.(*corev1.Node)
 	newNode, okNew := e.ObjectNew.(*corev1.Node)
@@ -645,67 +332,24 @@ func (nodePredicate) Update(e event.UpdateEvent) bool {
 		return false
 	}
 
-	// 1. Check labels and annotations changes
-	if !reflect.DeepEqual(oldNode.Labels, newNode.Labels) {
-		return true
-	}
-	if !reflect.DeepEqual(oldNode.Annotations, newNode.Annotations) {
-		return true
-	}
+	return hasSelectivePrefixChange(oldNode.Labels, newNode.Labels) ||
+		hasSelectivePrefixChange(oldNode.Annotations, newNode.Annotations)
+}
 
-	// 2. Check spec changes (e.g. cordoning)
-	if oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable {
-		return true
-	}
-
-	// 3. Check system metadata changes
-	if oldNode.Status.NodeInfo.KubeletVersion != newNode.Status.NodeInfo.KubeletVersion ||
-		oldNode.Status.NodeInfo.ContainerRuntimeVersion != newNode.Status.NodeInfo.ContainerRuntimeVersion ||
-		oldNode.Status.NodeInfo.KernelVersion != newNode.Status.NodeInfo.KernelVersion ||
-		oldNode.Status.NodeInfo.OSImage != newNode.Status.NodeInfo.OSImage ||
-		oldNode.Status.NodeInfo.Architecture != newNode.Status.NodeInfo.Architecture {
-		return true
-	}
-
-	// 4. Check core status condition changes (ignoring timestamps)
-	for _, condType := range []corev1.NodeConditionType{
-		corev1.NodeReady,
-		corev1.NodeMemoryPressure,
-		corev1.NodeDiskPressure,
-		corev1.NodePIDPressure,
-		corev1.NodeNetworkUnavailable,
-	} {
-		var oldStatus corev1.ConditionStatus
-		var newStatus corev1.ConditionStatus
-		for _, c := range oldNode.Status.Conditions {
-			if c.Type == condType {
-				oldStatus = c.Status
-				break
+func hasSelectivePrefixChange(oldMap, newMap map[string]string) bool {
+	for k, v := range newMap {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			if oldVal, exists := oldMap[k]; !exists || oldVal != v {
+				return true
 			}
 		}
-		for _, c := range newNode.Status.Conditions {
-			if c.Type == condType {
-				newStatus = c.Status
-				break
+	}
+	for k := range oldMap {
+		if strings.HasPrefix(k, "compliance.kubeorthos.io/") || strings.HasPrefix(k, "quarantine.kubeorthos.io/") {
+			if _, exists := newMap[k]; !exists {
+				return true
 			}
 		}
-		if oldStatus != newStatus {
-			return true
-		}
 	}
-
-	// 5. Check allocatable resources changes
-	for _, resName := range []corev1.ResourceName{
-		corev1.ResourceCPU,
-		corev1.ResourceMemory,
-		corev1.ResourceEphemeralStorage,
-	} {
-		oldQty := oldNode.Status.Allocatable[resName]
-		newQty := newNode.Status.Allocatable[resName]
-		if oldQty.Cmp(newQty) != 0 {
-			return true
-		}
-	}
-
 	return false
 }
