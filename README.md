@@ -104,6 +104,7 @@ KubeOrthos includes a Validating Admission Webhook that intercepts `ClusterRule`
 - `cmd/main.go`: Entry point for the Operator manager.
 - `api/`: Custom Resource Definitions (CRDs) for configuring policies.
 - `internal/controller/`: Reconcile loops to monitor and enforce configuration correctness.
+  - `compliance.go`: Shared package-level helper functions for node compliance auditing and enforcement.
 
 ## AI Skills Files
 
