@@ -53,6 +53,9 @@ const (
 
 	// LabelNodeRoleMaster is the legacy label indicating a control-plane/master node
 	LabelNodeRoleMaster = "node-role.kubernetes.io/master"
+
+	// LabelCompliancePrefix is the prefix used for tracking compliance labels per rule (e.g. compliance.kubeorthos.io/<rule>)
+	LabelCompliancePrefix = "compliance.kubeorthos.io/"
 )
 
 // Event Reasons used when emitting Kubernetes Events
