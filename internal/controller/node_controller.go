@@ -66,6 +66,14 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	originalNode := node.DeepCopy()
 
+	// Exclude control plane / master nodes from NodeReconciler
+	_, isCP := node.Labels[constants.LabelNodeRoleControlPlane]
+	_, isMaster := node.Labels[constants.LabelNodeRoleMaster]
+	if isCP || isMaster {
+		log.Info("Skipping control plane node in NodeReconciler", "node", node.Name)
+		return ctrl.Result{}, nil
+	}
+
 	log.Info("Reconciling Node", "name", node.Name)
 
 	// List all ClusterRules in the cache

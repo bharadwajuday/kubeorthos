@@ -167,6 +167,14 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	nonCompliantNodes := []string{}
 	for _, node := range nodeList.Items {
+		// Exclude control plane / master nodes from ClusterRuleReconciler
+		_, isCP := node.Labels[constants.LabelNodeRoleControlPlane]
+		_, isMaster := node.Labels[constants.LabelNodeRoleMaster]
+		if isCP || isMaster {
+			log.Info("Skipping control plane node in ClusterRuleReconciler", "node", node.Name)
+			continue
+		}
+
 		originalNode := node.DeepCopy() // Keep original state for diff patching
 		isCompliant, mismatchMsg := auditNodeCompliance(&rule, &node)
 

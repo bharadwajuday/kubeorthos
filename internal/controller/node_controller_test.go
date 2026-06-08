@@ -228,5 +228,52 @@ var _ = Describe("Node Controller", func() {
 			Expect(node.Annotations).NotTo(HaveKey(constants.AnnotationQuarantined))
 			Expect(node.Spec.Unschedulable).To(BeFalse())
 		})
+
+		It("should completely ignore control-plane nodes and not stamp labels/annotations", func() {
+			rule := &auditv1alpha1.ClusterRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: ruleName,
+				},
+				Spec: auditv1alpha1.ClusterRuleSpec{
+					Action: auditv1alpha1.ActionEnforce,
+					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
+						KubeletVersion: "v1.35.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: nodeName,
+					Labels: map[string]string{
+						constants.LabelNodeRoleControlPlane: "",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			node.Status = corev1.NodeStatus{
+				NodeInfo: corev1.NodeSystemInfo{
+					KubeletVersion: "v1.15.0-outdated",
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+
+			nodeReconciler := &NodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := nodeReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			Expect(node.Labels).NotTo(HaveKey(constants.LabelCompliancePrefix + ruleName))
+			Expect(node.Annotations).NotTo(HaveKey(constants.AnnotationQuarantinePrefix + ruleName))
+			Expect(node.Spec.Unschedulable).To(BeFalse())
+		})
 	})
 })
