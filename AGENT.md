@@ -49,6 +49,7 @@ The application is structured following standard Go Kubernetes Operator patterns
    - **NodeReconciler**: Watches `corev1.Node` updates (filtered by the heartbeat-ignoring `nodePredicate`). It also watches `ClusterRule` changes, mapping them to reconcile all nodes. When triggered, it fetches only the changing node and lists all rules in the cache.
    - **ClusterRuleReconciler**: Watches `ClusterRule` changes directly. It also watches `corev1.Node` updates, but uses a prefix-based, label-selective map watch that *only* enqueues rule reconciles when compliance tracking labels (`compliance.kubeorthos.io/`) or quarantine annotations change, preventing global fan-out thundering herds on node status updates.
 3. **Evaluation & Enforcement (NodeReconciler)**:
+   - **Control Plane Filtering**: Excludes control plane and master nodes from evaluation entirely (checks labels `node-role.kubernetes.io/control-plane` and `node-role.kubernetes.io/master`) to prevent any auditing, labeling, or cordoning.
    - Checks compliance using the shared auditing function.
    - Stamps compliance tracking labels: `compliance.kubeorthos.io/<rule-name>: "true"|"false"`.
    - If non-compliant and `action` is `Enforce` on a worker node, cordons the node and stamps rule-specific quarantine annotations: `quarantine.kubeorthos.io/<rule-name>: "true"`.
