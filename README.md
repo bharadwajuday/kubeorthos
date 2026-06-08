@@ -86,7 +86,7 @@ kubectl apply -f baseline.yaml
 
 4. **Active Enforcement (Cordoning & Scoped Quarantining)**: If `action` is set to `Enforce`, the operator actively quarantines non-compliant targeted worker nodes:
    - **Worker Nodes**: Actively cordoned (`Unschedulable = true`), annotated with `policy.kubeorthos.io/quarantined: "true"`, and stamped with a namespaced rule claim annotation: `quarantine.kubeorthos.io/<rule-name>: "true"`.
-   - **Control Plane Nodes**: Automatically excluded from active cordoning to protect cluster control plane stability.
+   - **Control Plane Nodes**: Automatically and completely excluded from both `ClusterRule` and `Node` reconciliation loops to guarantee safety, avoid stamping compliance labels, and prevent any active cordoning, quarantining, or reclamation jobs from executing on the cluster control plane.
    - **Remediation & Reference-Counted Uncordoning**: Once a cordoned node becomes compliant, KubeOrthos releases its rule-specific quarantine claim (`quarantine.kubeorthos.io/<rule-name>`). The node is safely uncordoned and the general quarantined annotation removed **only** if no other active policies are still claiming quarantine annotations on that node. This prevents split-brain reconcile loops between overlapping rules.
 
 5. **Automated Resource Reclamation**: If `reclamation` is configured and a targeted worker node experiences `DiskPressure`, KubeOrthos dynamically triggers a node-level cleanup Job to prune unused images, delete stopped containers, and truncate large logs to actively restore the node to health.
