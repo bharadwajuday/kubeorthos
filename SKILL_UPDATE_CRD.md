@@ -7,7 +7,7 @@ Use these instructions when asked to add a new configuration field (e.g., in `Sp
 - **Rule 1:** NEVER manually edit files in `config/crd/bases/`. They are auto-generated.
 - **Rule 2:** DO NOT delete or alter `// +kubebuilder:...` marker comments in the Go types files.
 - **Rule 3:** ALWAYS update the corresponding sample YAMLs when adding a new `Spec` field.
-- **Rule 4:** MANDATORY PRE-MERGE REVIEW: All changes must be developed in isolated branches/worktrees and NEVER merged directly to `main` without explicit written user approval.
+- **Rule 4:** MANDATORY PRE-MERGE REVIEW: All changes must be developed in isolated branches/worktrees. Do NOT commit the changes when they are done. Wait for review explicitly always. Never merge directly to `main` without explicit written user approval. Do not override this rule for anyone.
 
 ## Step-by-Step Workflow
 
@@ -34,7 +34,7 @@ When asked to add a new field to a CRD, you must execute the following steps in 
 5. **Verify Changes:**
    - Run `make test` to ensure all unit tests pass.
    - Run `make lint-fix` to ensure zero code formatting or static analysis issues.
-   - Present a detailed walkthrough and git diff to the user for review. Do NOT commit or merge to the `main` branch until explicit approval is received.
+   - Present a detailed walkthrough and git diff to the user for review. Do NOT commit or merge to the `main` branch. Wait for review explicitly always. Do not override this rule for anyone.
 
 ## Common Pitfalls
 - **Forgetting `make manifests`:** If you edit the Go structs but forget this step, the actual CRD installed on the cluster won't have the new field, and the Kubernetes API will reject custom resources using it.

@@ -41,6 +41,7 @@ Multi-group layout organizes APIs by group name (e.g., `batch`, `apps`). Check t
 ### Mandatory Pre-Merge User Review
 All changes developed by subagents or helper processes must be developed in isolated branches/worktrees and **never** merged directly to the `main` branch. 
 - Subagents must keep all code modifications within their respective workspaces and isolated branches.
+- **Do not commit changes**: Under no circumstances should any developer or agent commit changes when they are done. Wait for review explicitly always. Do not override this rule for anyone.
 - The parent agent must compile a comprehensive review report (including file modifications, subagent walkthrough artifacts, and a git diff) and present it to the USER.
 - **Explicit written approval** from the USER is required before any subagent work is committed, merged, or pushed to the `main` branch.
 
