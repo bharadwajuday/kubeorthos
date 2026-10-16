@@ -1134,5 +1134,96 @@ var _ = Describe("ClusterRule Controller", func() {
 			// Check reclamation failures metric
 			Expect(testutil.ToFloat64(ReclamationJobFailuresTotal.WithLabelValues("metrics-reclaim-node"))).To(Equal(initFailures + 1))
 		})
+
+		It("should accurately populate status summary and nonCompliantNodes details", func() {
+			// Create 3 nodes:
+			// - worker-1: compliant
+			// - worker-2: non-compliant (kubelet version mismatch)
+			// - control-plane: control plane node (should be excluded from total and matched)
+			node1 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "worker-compliant",
+					Labels: map[string]string{"kubernetes.io/os": "linux", "tier": "backend"},
+				},
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						KubeletVersion: "v1.34.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node1)).To(Succeed())
+
+			node2 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "worker-mismatch",
+					Labels: map[string]string{"kubernetes.io/os": "linux", "tier": "backend"},
+				},
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						KubeletVersion: "v1.32.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node2)).To(Succeed())
+
+			cpNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "cp-node",
+					Labels: map[string]string{constants.LabelNodeRoleControlPlane: ""},
+				},
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						KubeletVersion: "v1.32.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cpNode)).To(Succeed())
+
+			rule := &auditv1alpha1.ClusterRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      metricsRuleName,
+					Namespace: "default",
+				},
+				Spec: auditv1alpha1.ClusterRuleSpec{
+					Action: auditv1alpha1.ActionEnforce,
+					NodeSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"tier": "backend"},
+					},
+					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
+						KubeletVersion: "v1.34.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
+
+			controllerReconciler := &ClusterRuleReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Fetch updated rule
+			updatedRule := &auditv1alpha1.ClusterRule{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updatedRule)).To(Succeed())
+
+			// Verify Summary counts
+			Expect(updatedRule.Status.Summary).NotTo(BeNil())
+			Expect(updatedRule.Status.Summary.TotalNodes).To(Equal(2))
+			Expect(updatedRule.Status.Summary.MatchedNodes).To(Equal(2))
+			Expect(updatedRule.Status.Summary.CompliantNodes).To(Equal(1))
+			Expect(updatedRule.Status.Summary.NonCompliantNodes).To(Equal(1))
+
+			// Verify NonCompliantNodes details
+			Expect(updatedRule.Status.NonCompliantNodes).To(HaveLen(1))
+			detail := updatedRule.Status.NonCompliantNodes[0]
+			Expect(detail.Name).To(Equal("worker-mismatch"))
+			Expect(detail.Quarantined).To(BeTrue())
+			Expect(detail.Reasons).To(ContainElement(ContainSubstring("KubeletVersion mismatch")))
+		})
 	})
 })

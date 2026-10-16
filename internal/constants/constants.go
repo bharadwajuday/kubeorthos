@@ -119,4 +119,7 @@ const (
 
 	// DefaultReclamationImage is the base image used for node reclamation Jobs
 	DefaultReclamationImage = "alpine:3.18"
+
+	// MaxStatusNonCompliantNodes limits the number of detailed non-compliant node entries in ClusterRule.Status
+	MaxStatusNonCompliantNodes = 50
 )

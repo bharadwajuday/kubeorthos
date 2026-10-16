@@ -165,7 +165,27 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Fetch all cluster worker nodes to compute totalNodes accurately
+	var allNodes corev1.NodeList
+	if err := r.List(ctx, &allNodes); err != nil {
+		log.Error(err, "unable to list all Nodes for totalNodes metric")
+		return ctrl.Result{}, err
+	}
+	totalWorkerNodes := 0
+	for _, node := range allNodes.Items {
+		_, isCP := node.Labels[constants.LabelNodeRoleControlPlane]
+		_, isMaster := node.Labels[constants.LabelNodeRoleMaster]
+		if !isCP && !isMaster {
+			totalWorkerNodes++
+		}
+	}
+
+	matchedWorkerNodes := 0
+	compliantCount := 0
+	nonCompliantCount := 0
+	detailedNonCompliantNodes := []auditv1alpha1.NonCompliantNodeDetail{}
 	nonCompliantNodes := []string{}
+
 	for _, node := range nodeList.Items {
 		// Exclude control plane / master nodes from ClusterRuleReconciler
 		_, isCP := node.Labels[constants.LabelNodeRoleControlPlane]
@@ -175,6 +195,7 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			continue
 		}
 
+		matchedWorkerNodes++
 		originalNode := node.DeepCopy() // Keep original state for diff patching
 		isCompliant, mismatchMsg := auditNodeCompliance(&rule, &node)
 
@@ -182,15 +203,42 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		NodesEvaluatedTotal.WithLabelValues(rule.Name).Inc()
 		if isCompliant {
 			NodesCompliantTotal.WithLabelValues(rule.Name).Inc()
+			compliantCount++
 		} else {
 			NodesNonCompliantTotal.WithLabelValues(rule.Name).Inc()
+			nonCompliantCount++
 		}
 
 		log.Info("Audited node against ClusterRule expectations", "node", node.Name, "kubeletVersionChecked", rule.Spec.ExpectedNodeConfig.KubeletVersion != "", "containerRuntimeChecked", rule.Spec.ExpectedNodeConfig.ContainerRuntime != "", "kernelVersionChecked", rule.Spec.ExpectedNodeConfig.KernelVersion != "", "osImageChecked", rule.Spec.ExpectedNodeConfig.OSImage != "", "architectureChecked", rule.Spec.ExpectedNodeConfig.Architecture != "", "conditionsCheckedCount", len(rule.Spec.ExpectedConditions), "minimumResourcesChecked", rule.Spec.MinimumResources != nil, "isCompliant", isCompliant)
 
+		ruleQuarantineKey := constants.AnnotationQuarantinePrefix + rule.Name
+		cordonUpdated := reconcileCordoning(r.Recorder, &rule, &node, isCompliant)
+		labelUpdated := reconcileLabeling(r.Recorder, &rule, &node, isCompliant)
+
 		if !isCompliant {
 			nonCompliantNodes = append(nonCompliantNodes, node.Name)
 			log.Info("Node is non-compliant", "node", node.Name, "mismatches", mismatchMsg)
+
+			// Parse mismatches into distinct reason strings
+			var reasons []string
+			if strings.TrimSpace(mismatchMsg) != "" {
+				for _, part := range strings.Split(mismatchMsg, ". ") {
+					trimmed := strings.TrimSpace(part)
+					if trimmed != "" {
+						reasons = append(reasons, trimmed)
+					}
+				}
+			}
+
+			isQuarantined := node.Annotations != nil && node.Annotations[ruleQuarantineKey] == constants.ValueTrue
+			if len(detailedNonCompliantNodes) < constants.MaxStatusNonCompliantNodes {
+				detailedNonCompliantNodes = append(detailedNonCompliantNodes, auditv1alpha1.NonCompliantNodeDetail{
+					Name:        node.Name,
+					Reasons:     reasons,
+					Quarantined: isQuarantined,
+				})
+			}
+
 			switch rule.Spec.Action {
 			case auditv1alpha1.ActionAudit:
 				r.Recorder.Eventf(&rule, nil, corev1.EventTypeWarning, constants.EventReasonNonCompliantNode, constants.EventActionAudit, "Node %s is non-compliant: %s", node.Name, mismatchMsg)
@@ -199,11 +247,7 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		}
 
-		cordonUpdated := reconcileCordoning(r.Recorder, &rule, &node, isCompliant)
-		labelUpdated := reconcileLabeling(r.Recorder, &rule, &node, isCompliant)
-
 		// Update Node quarantine status metric based on annotation presence after reconcileCordoning
-		ruleQuarantineKey := constants.AnnotationQuarantinePrefix + rule.Name
 		if node.Annotations != nil && node.Annotations[ruleQuarantineKey] == constants.ValueTrue {
 			NodeQuarantineStatus.WithLabelValues(node.Name, rule.Name).Set(1)
 		} else {
@@ -224,7 +268,16 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	// Update Status
+	// Update Status Summary
+	rule.Status.Summary = &auditv1alpha1.ClusterRuleStatusSummary{
+		TotalNodes:        totalWorkerNodes,
+		MatchedNodes:      matchedWorkerNodes,
+		CompliantNodes:    compliantCount,
+		NonCompliantNodes: nonCompliantCount,
+	}
+	rule.Status.NonCompliantNodes = detailedNonCompliantNodes
+
+	// Update Status Condition
 	condition := metav1.Condition{
 		Type:               constants.ConditionTypeCompliant,
 		Status:             metav1.ConditionTrue,
@@ -233,7 +286,7 @@ func (r *ClusterRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		ObservedGeneration: rule.Generation,
 	}
 
-	if rule.Spec.NodeSelector != nil && len(nodeList.Items) == 0 {
+	if rule.Spec.NodeSelector != nil && matchedWorkerNodes == 0 {
 		condition.Reason = constants.ConditionReasonNoMatchingNodes
 		condition.Message = "No nodes matched the specified node selector"
 	} else if len(nonCompliantNodes) > 0 {

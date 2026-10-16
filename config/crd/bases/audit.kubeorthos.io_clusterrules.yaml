@@ -14,7 +14,26 @@ spec:
     singular: clusterrule
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.action
+      name: Action
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Compliant')].status
+      name: Status
+      type: string
+    - jsonPath: .status.summary.matchedNodes
+      name: Matched
+      type: integer
+    - jsonPath: .status.summary.compliantNodes
+      name: Compliant
+      type: integer
+    - jsonPath: .status.summary.nonCompliantNodes
+      name: Non-Compliant
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: ClusterRule is the Schema for the clusterrules API
@@ -298,6 +317,54 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              nonCompliantNodes:
+                description: NonCompliantNodes lists details of nodes that failed
+                  compliance checks.
+                items:
+                  description: NonCompliantNodeDetail provides diagnostic information
+                    for a non-compliant node.
+                  properties:
+                    name:
+                      description: Name is the name of the non-compliant node.
+                      type: string
+                    quarantined:
+                      description: Quarantined indicates whether the node is currently
+                        cordoned/quarantined by this rule.
+                      type: boolean
+                    reasons:
+                      description: Reasons lists the specific configuration or condition
+                        mismatches observed.
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              summary:
+                description: Summary holds aggregate counts of nodes evaluated under
+                  this rule.
+                properties:
+                  compliantNodes:
+                    description: CompliantNodes is the number of matched nodes that
+                      satisfied all rule requirements.
+                    type: integer
+                  matchedNodes:
+                    description: MatchedNodes is the number of nodes that matched
+                      the rule's nodeSelector.
+                    type: integer
+                  nonCompliantNodes:
+                    description: NonCompliantNodes is the number of matched nodes
+                      that failed one or more requirements.
+                    type: integer
+                  totalNodes:
+                    description: TotalNodes is the total number of evaluated nodes
+                      in the cluster (excluding control plane nodes).
+                    type: integer
+                type: object
             type: object
         required:
         - spec

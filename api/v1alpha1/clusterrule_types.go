@@ -160,6 +160,39 @@ type ClusterRuleSpec struct {
 	Reclamation *ReclamationSpec `json:"reclamation,omitempty"`
 }
 
+// ClusterRuleStatusSummary provides aggregate counters for audited nodes.
+type ClusterRuleStatusSummary struct {
+	// TotalNodes is the total number of evaluated nodes in the cluster (excluding control plane nodes).
+	// +optional
+	TotalNodes int `json:"totalNodes"`
+
+	// MatchedNodes is the number of nodes that matched the rule's nodeSelector.
+	// +optional
+	MatchedNodes int `json:"matchedNodes"`
+
+	// CompliantNodes is the number of matched nodes that satisfied all rule requirements.
+	// +optional
+	CompliantNodes int `json:"compliantNodes"`
+
+	// NonCompliantNodes is the number of matched nodes that failed one or more requirements.
+	// +optional
+	NonCompliantNodes int `json:"nonCompliantNodes"`
+}
+
+// NonCompliantNodeDetail provides diagnostic information for a non-compliant node.
+type NonCompliantNodeDetail struct {
+	// Name is the name of the non-compliant node.
+	Name string `json:"name"`
+
+	// Reasons lists the specific configuration or condition mismatches observed.
+	// +optional
+	Reasons []string `json:"reasons,omitempty"`
+
+	// Quarantined indicates whether the node is currently cordoned/quarantined by this rule.
+	// +optional
+	Quarantined bool `json:"quarantined,omitempty"`
+}
+
 // ClusterRuleStatus defines the observed state of ClusterRule.
 type ClusterRuleStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
@@ -181,11 +214,27 @@ type ClusterRuleStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Summary holds aggregate counts of nodes evaluated under this rule.
+	// +optional
+	Summary *ClusterRuleStatusSummary `json:"summary,omitempty"`
+
+	// NonCompliantNodes lists details of nodes that failed compliance checks.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	NonCompliantNodes []NonCompliantNodeDetail `json:"nonCompliantNodes,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Action",type=string,JSONPath=".spec.action"
+// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=".status.conditions[?(@.type=='Compliant')].status"
+// +kubebuilder:printcolumn:name="Matched",type=integer,JSONPath=".status.summary.matchedNodes"
+// +kubebuilder:printcolumn:name="Compliant",type=integer,JSONPath=".status.summary.compliantNodes"
+// +kubebuilder:printcolumn:name="Non-Compliant",type=integer,JSONPath=".status.summary.nonCompliantNodes"
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 
 // ClusterRule is the Schema for the clusterrules API
 type ClusterRule struct {
