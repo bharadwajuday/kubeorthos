@@ -23,6 +23,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -274,10 +275,6 @@ func reconcileReclamation(ctx context.Context, c client.Client, recorder events.
 		}
 	}
 
-	if !hasDiskPressure {
-		return nil
-	}
-
 	jobNamespace := rule.Namespace
 	if jobNamespace == "" {
 		jobNamespace = "default"
@@ -293,70 +290,18 @@ func reconcileReclamation(ctx context.Context, c client.Client, recorder events.
 		return err
 	}
 
-	if len(jobList.Items) == 0 {
-		safeNodeName := strings.ReplaceAll(node.Name, ".", "-")
-		jobName := fmt.Sprintf("reclaim-%s-%s", rule.Name, safeNodeName)
-		if len(jobName) > 63 {
-			jobName = jobName[:63]
-		}
-
-		jobLabels := map[string]string{
-			constants.LabelReclamationNode: node.Name,
-			constants.LabelClusterRule:     rule.Name,
-		}
-
-		cleanImages := true
-		if rule.Spec.Reclamation.DiskPressure.CleanImages != nil {
-			cleanImages = *rule.Spec.Reclamation.DiskPressure.CleanImages
-		}
-		cleanContainers := true
-		if rule.Spec.Reclamation.DiskPressure.CleanContainers != nil {
-			cleanContainers = *rule.Spec.Reclamation.DiskPressure.CleanContainers
-		}
-		cleanLogs := false
-		if rule.Spec.Reclamation.DiskPressure.CleanLogs != nil {
-			cleanLogs = *rule.Spec.Reclamation.DiskPressure.CleanLogs
-		}
-		logSizeLimit := constants.DefaultLogSizeLimit
-		if rule.Spec.Reclamation.DiskPressure.LogSizeLimit != "" {
-			logSizeLimit = rule.Spec.Reclamation.DiskPressure.LogSizeLimit
-		}
-
-		script := "#!/bin/sh\nset -ex\n"
-		if cleanImages {
-			script += "echo 'Pruning containerd images...'\n"
-			script += "crictl rmi --prune || true\n"
-		}
-		if cleanContainers {
-			script += "echo 'Pruning stopped containers...'\n"
-			script += "crictl rm $(crictl ps -a -q) || true\n"
-		}
-		if cleanLogs {
-			script += "echo 'Truncating large logs...'\n"
-			script += fmt.Sprintf("find /host/var/log/pods -type f -name '*.log' -size +%s -exec truncate -s 0 {} \\;\n", logSizeLimit)
-		}
-
-		job := utils.NewReclamationJob(jobName, jobNamespace, node.Name, script, jobLabels)
-
-		if err := c.Create(ctx, job); err != nil {
-			log.Error(err, "unable to create reclamation job", "job", jobName)
-			return err
-		}
-		ReclamationJobsTriggeredTotal.WithLabelValues(node.Name, "DiskPressure").Inc()
-		log.Info("Triggered automated resource reclamation Job", "node", node.Name, "job", jobName)
-		recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonReclamationTriggered, constants.EventActionReclamation, "Triggered automated reclamation Job %s on node %s", jobName, node.Name)
-	} else {
-		// Check active Job status
+	if len(jobList.Items) > 0 {
+		// Check active or finished Job status (even if DiskPressure has cleared, clean up finished Jobs)
 		existingJob := &jobList.Items[0]
 		if existingJob.Status.Succeeded > 0 {
-			if err := c.Delete(ctx, existingJob); err != nil {
+			if err := c.Delete(ctx, existingJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
 				log.Error(err, "unable to delete succeeded reclamation job", "job", existingJob.Name)
 				return err
 			}
 			log.Info("Automated resource reclamation completed successfully", "node", node.Name)
 			recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonReclamationCompleted, constants.EventActionReclamation, "Automated resource reclamation completed successfully on node %s", node.Name)
 		} else if existingJob.Status.Failed > 0 {
-			if err := c.Delete(ctx, existingJob); err != nil {
+			if err := c.Delete(ctx, existingJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
 				log.Error(err, "unable to delete failed reclamation job", "job", existingJob.Name)
 				return err
 			}
@@ -364,7 +309,56 @@ func reconcileReclamation(ctx context.Context, c client.Client, recorder events.
 			log.Info("Automated resource reclamation failed", "node", node.Name)
 			recorder.Eventf(rule, nil, corev1.EventTypeWarning, constants.EventReasonReclamationFailed, constants.EventActionReclamation, "Automated resource reclamation failed on node %s", node.Name)
 		}
+		return nil
 	}
+
+	if !hasDiskPressure {
+		return nil
+	}
+
+	safeNodeName := strings.ReplaceAll(node.Name, ".", "-")
+	jobName := fmt.Sprintf("reclaim-%s-%s", rule.Name, safeNodeName)
+	if len(jobName) > 63 {
+		jobName = jobName[:63]
+	}
+
+	jobLabels := map[string]string{
+		constants.LabelReclamationNode: node.Name,
+		constants.LabelClusterRule:     rule.Name,
+	}
+
+	cleanImages := true
+	if rule.Spec.Reclamation.DiskPressure.CleanImages != nil {
+		cleanImages = *rule.Spec.Reclamation.DiskPressure.CleanImages
+	}
+	cleanContainers := true
+	if rule.Spec.Reclamation.DiskPressure.CleanContainers != nil {
+		cleanContainers = *rule.Spec.Reclamation.DiskPressure.CleanContainers
+	}
+	cleanLogs := false
+	if rule.Spec.Reclamation.DiskPressure.CleanLogs != nil {
+		cleanLogs = *rule.Spec.Reclamation.DiskPressure.CleanLogs
+	}
+	logSizeLimit := constants.DefaultLogSizeLimit
+	if rule.Spec.Reclamation.DiskPressure.LogSizeLimit != "" {
+		logSizeLimit = rule.Spec.Reclamation.DiskPressure.LogSizeLimit
+	}
+
+	script, err := utils.BuildReclamationScript(cleanImages, cleanContainers, cleanLogs, logSizeLimit)
+	if err != nil {
+		log.Error(err, "unable to build reclamation script", "node", node.Name, "rule", rule.Name)
+		return err
+	}
+
+	job := utils.NewReclamationJob(jobName, jobNamespace, node.Name, rule.Spec.Reclamation.DiskPressure.Image, script, jobLabels)
+
+	if err := c.Create(ctx, job); err != nil {
+		log.Error(err, "unable to create reclamation job", "job", jobName)
+		return err
+	}
+	ReclamationJobsTriggeredTotal.WithLabelValues(node.Name, "DiskPressure").Inc()
+	log.Info("Triggered automated resource reclamation Job", "node", node.Name, "job", jobName)
+	recorder.Eventf(rule, nil, corev1.EventTypeNormal, constants.EventReasonReclamationTriggered, constants.EventActionReclamation, "Triggered automated reclamation Job %s on node %s", jobName, node.Name)
 
 	return nil
 }

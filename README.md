@@ -76,6 +76,7 @@ spec:
       cleanContainers: true
       cleanLogs: true
       logSizeLimit: "100Mi"
+      image: "ghcr.io/bharadwajuday/kubeorthos-reclaim:latest"
 ```
 
 2. Apply the rule to your cluster:
@@ -90,9 +91,10 @@ kubectl apply -f baseline.yaml
    - **Control Plane Nodes**: Automatically and completely excluded from both `ClusterRule` and `Node` reconciliation loops to guarantee safety, avoid stamping compliance labels, and prevent any active cordoning, quarantining, or reclamation jobs from executing on the cluster control plane.
    - **Remediation & Reference-Counted Uncordoning**: Once a cordoned node becomes compliant, KubeOrthos releases its rule-specific quarantine claim (`quarantine.kubeorthos.io/<rule-name>`). The node is safely uncordoned and the general quarantined annotation removed **only** if no other active policies are still claiming quarantine annotations on that node. This prevents split-brain reconcile loops between overlapping rules.
 
-5. **Automated Resource Reclamation**: If `reclamation` is configured and a targeted worker node experiences `DiskPressure`, KubeOrthos dynamically triggers a node-level cleanup Job to prune unused images, delete stopped containers, and truncate large logs to actively restore the node to health.
-   - **Shell Injection (RCE) Prevention**: The `logSizeLimit` field uses a strict regex pattern validation marker (`^[0-9]+[kKmMgGtTpP]i?$`) at the Kubernetes API Admission level to block malicious shell characters or control sequences.
-   - **Hardened Execution Context**: The reclamation Job container runs in a non-privileged context, blocks privilege escalation (`AllowPrivilegeEscalation: false`), drops all standard Linux capabilities, and mounts only the containerd socket and host logs directory with the narrow `DAC_OVERRIDE` capability (necessary to safely truncate root-owned log files on host volumes).
+5. **Automated Resource Reclamation**: If `reclamation` is configured and a targeted worker node experiences `DiskPressure`, KubeOrthos dynamically triggers a node-level cleanup Job to prune unused images, delete exited containers (`crictl ps -a -q --state=exited`), and truncate large logs to actively restore the node to health.
+   - **Configurable Runtime Image & Preflight Check**: Use `spec.reclamation.diskPressure.image` to supply an image containing `crictl` when image/container pruning is enabled (otherwise falling back to the default image); the generated script explicitly verifies `crictl` availability before attempting pruning rather than masking failures.
+   - **Shell Injection (RCE) Prevention & Portable Size Units**: The `logSizeLimit` field uses a strict regex pattern validation marker (`^[0-9]+[kKmMgGtTpP]i?$`) at the Kubernetes API Admission level and is parsed into an exact byte count via `ParseLogSizeLimitBytes` (`find ... -size +<bytes>c`), ensuring compatibility across both BusyBox and GNU `find`.
+   - **Hardened Execution Context & Bounded Job Lifecycle**: The reclamation Job container runs explicitly non-privileged (`Privileged: false`), blocks privilege escalation (`AllowPrivilegeEscalation: false`), drops all standard Linux capabilities, and mounts only the containerd socket and host logs directory with the narrow `DAC_OVERRIDE` capability (necessary to safely truncate root-owned log files on host volumes). Jobs are bounded with `ActiveDeadlineSeconds` (600s) and `TTLSecondsAfterFinished` (300s), and completed/failed Jobs are proactively cleaned up even after `DiskPressure` clears.
 
 If any deviations are found, the operator will emit `Warning` events and set the `Compliant` status condition of the `ClusterRule` to `False`. If no nodes match the selector, the condition reason will be `NoMatchingNodes` with status `True`.
 

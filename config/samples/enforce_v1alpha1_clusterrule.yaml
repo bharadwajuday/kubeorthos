@@ -39,4 +39,5 @@ spec:
       cleanContainers: true
       cleanLogs: true
       logSizeLimit: "100Mi"
+      image: "ghcr.io/bharadwajuday/kubeorthos-reclaim:latest"
 

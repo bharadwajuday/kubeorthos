@@ -113,6 +113,12 @@ type DiskPressureReclamation struct {
 	// +optional
 	// +kubebuilder:validation:Pattern="^[0-9]+[kKmMgGtTpP]i?$"
 	LogSizeLimit string `json:"logSizeLimit,omitempty"`
+
+	// Image specifies the container image to run for disk pressure reclamation Jobs.
+	// The image should include crictl (when cleanImages or cleanContainers is enabled) and standard POSIX utilities (sh, find, truncate).
+	// If omitted, the operator's default reclamation image is used.
+	// +optional
+	Image string `json:"image,omitempty"`
 }
 
 // ReclamationSpec configures automated cleanups on non-compliant nodes

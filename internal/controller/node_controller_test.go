@@ -478,6 +478,7 @@ var _ = Describe("Node Controller", func() {
 
 		It("should trigger automated resource reclamation when node experiences DiskPressure", func() {
 			reclaimRuleName := "test-reclaim-rule"
+			customImage := "ghcr.io/bharadwajuday/kubeorthos-reclaim:v1"
 			rule := &auditv1alpha1.ClusterRule{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: reclaimRuleName,
@@ -493,6 +494,7 @@ var _ = Describe("Node Controller", func() {
 							CleanContainers: utils.BoolPtr(true),
 							CleanLogs:       utils.BoolPtr(true),
 							LogSizeLimit:    "100Mi",
+							Image:           customImage,
 						},
 					},
 				},
@@ -532,7 +534,12 @@ var _ = Describe("Node Controller", func() {
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-test-reclaim-rule-pressured-worker-node", Namespace: "default"}, job)).To(Succeed())
 			Expect(job.Spec.Template.Spec.NodeName).To(Equal("pressured-worker-node"))
-			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Privileged).To(BeNil())
+			Expect(job.Spec.TTLSecondsAfterFinished).To(Equal(utils.Int32Ptr(constants.DefaultReclamationJobTTLSeconds)))
+			Expect(job.Spec.ActiveDeadlineSeconds).To(Equal(utils.Int64Ptr(constants.DefaultReclamationJobTimeoutSeconds)))
+			Expect(job.Spec.Template.Spec.Containers[0].Image).To(Equal(customImage))
+			Expect(job.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("-size +104857600c"))
+			Expect(job.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("--state=exited"))
+			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Privileged).To(Equal(utils.BoolPtr(false)))
 			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation).To(Equal(utils.BoolPtr(false)))
 			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
 			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities.Add).To(ContainElement(corev1.Capability("DAC_OVERRIDE")))
@@ -548,6 +555,80 @@ var _ = Describe("Node Controller", func() {
 
 			Eventually(func(g Gomega) {
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-test-reclaim-rule-pressured-worker-node", Namespace: "default"}, job)
+				g.Expect(apierrors.IsNotFound(err) || job.DeletionTimestamp != nil).To(BeTrue())
+			}, "10s").Should(Succeed())
+		})
+
+		It("should clean up completed reclamation Job even after DiskPressure clears", func() {
+			reclaimRuleName := "test-reclaim-post-clear"
+			rule := &auditv1alpha1.ClusterRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: reclaimRuleName,
+				},
+				Spec: auditv1alpha1.ClusterRuleSpec{
+					Action: auditv1alpha1.ActionAudit,
+					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
+						KubeletVersion: "v1.34.0",
+					},
+					Reclamation: &auditv1alpha1.ReclamationSpec{
+						DiskPressure: &auditv1alpha1.DiskPressureReclamation{
+							CleanImages: utils.BoolPtr(true),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rule) }()
+
+			workerNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "recovered-worker-node",
+				},
+			}
+			Expect(k8sClient.Create(ctx, workerNode)).To(Succeed())
+			workerNode.Status = corev1.NodeStatus{
+				NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.34.0"},
+				Conditions: []corev1.NodeCondition{
+					{
+						Type:   corev1.NodeDiskPressure,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, workerNode)).To(Succeed())
+
+			nodeReconciler := &NodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			// 1. Trigger reclamation Job while DiskPressure=True
+			_, err := nodeReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "recovered-worker-node"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			job := &batchv1.Job{}
+			jobKey := types.NamespacedName{Name: "reclaim-test-reclaim-post-clear-recovered-worker-node", Namespace: "default"}
+			Expect(k8sClient.Get(ctx, jobKey, job)).To(Succeed())
+
+			// 2. Job succeeds AND DiskPressure clears before next reconcile
+			job.Status.Succeeded = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "recovered-worker-node"}, workerNode)).To(Succeed())
+			workerNode.Status.Conditions[0].Status = corev1.ConditionFalse
+			Expect(k8sClient.Status().Update(ctx, workerNode)).To(Succeed())
+
+			// 3. Reconcile should still clean up the completed Job instead of returning early
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "recovered-worker-node"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, jobKey, job)
 				g.Expect(apierrors.IsNotFound(err) || job.DeletionTimestamp != nil).To(BeTrue())
 			}, "10s").Should(Succeed())
 		})

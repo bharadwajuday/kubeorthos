@@ -234,6 +234,12 @@ spec:
                         description: 'CleanLogs specifies whether to truncate large
                           container logs (default: false)'
                         type: boolean
+                      image:
+                        description: |-
+                          Image specifies the container image to run for disk pressure reclamation Jobs.
+                          The image should include crictl (when cleanImages or cleanContainers is enabled) and standard POSIX utilities (sh, find, truncate).
+                          If omitted, the operator's default reclamation image is used.
+                        type: string
                       logSizeLimit:
                         description: LogSizeLimit specifies the threshold before truncating
                           logs (e.g. "100Mi")

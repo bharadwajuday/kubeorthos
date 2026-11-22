@@ -123,6 +123,12 @@ const (
 	// DefaultReclamationImage is the base image used for node reclamation Jobs
 	DefaultReclamationImage = "alpine:3.18"
 
+	// DefaultReclamationJobTTLSeconds is the TTL in seconds after a reclamation Job finishes before automatic cleanup
+	DefaultReclamationJobTTLSeconds int32 = 300
+
+	// DefaultReclamationJobTimeoutSeconds is the maximum execution time in seconds for a reclamation Job
+	DefaultReclamationJobTimeoutSeconds int64 = 600
+
 	// MaxStatusNonCompliantNodes limits the number of detailed non-compliant node entries in ClusterRule.Status
 	MaxStatusNonCompliantNodes = 50
 )

@@ -32,7 +32,7 @@ The application is structured following standard Go Kubernetes Operator patterns
 
 ### 5. `internal/utils`
 - **Responsibility**: Shared Helper Utilities.
-- **Key Concepts**: Contains helper modules like `jobs.go` which constructs template-based ephemeral cleanup/reclamation Jobs configured with a hardened security context (non-privileged mode, no privilege escalation, dropped capabilities, and `DAC_OVERRIDE` capability for secure log truncation). `utils.go` exports common pointer references (`BoolPtr`, `Int32Ptr`) used in API payloads.
+- **Key Concepts**: Contains helper modules like `jobs.go` which constructs template-based ephemeral cleanup/reclamation Jobs configured with a hardened security context (`Privileged: false`, no privilege escalation, dropped capabilities, and `DAC_OVERRIDE` capability for secure log truncation), configurable container image (`spec.reclamation.diskPressure.image`), `TTLSecondsAfterFinished` / `ActiveDeadlineSeconds` bounds, a `crictl` preflight check with `--state=exited` container pruning, and `ParseLogSizeLimitBytes` to convert Kubernetes size thresholds into portable `-size +<bytes>c` arguments. `utils.go` exports common pointer references (`BoolPtr`, `Int32Ptr`, `Int64Ptr`) used in API payloads.
 
 ### 6. `internal/validator`
 - **Responsibility**: The core rule engine.
@@ -55,7 +55,7 @@ The application is structured following standard Go Kubernetes Operator patterns
    - Applies/removes `complianceLabel` and `customLabels` on matching nodes.
    - If non-compliant and `action` is `Enforce` on a worker node, cordons the node and stamps rule-specific quarantine annotations: `quarantine.kubeorthos.io/<rule-name>: "true"`.
    - If compliant, uncordons the node and removes annotations (releasing claims), ensuring no other rules still have quarantine claims on the node.
-   - **Automated Resource Reclamation**: If a targeted worker node experiences `DiskPressure` and the `reclamation` block is configured, it automatically spawns an ephemeral, non-privileged node-reclamation Job in the designated namespace (defaulting to `"default"`).
+   - **Automated Resource Reclamation**: If a targeted worker node experiences `DiskPressure` and the `reclamation` block is configured, it automatically spawns an ephemeral, non-privileged (`Privileged: false`) node-reclamation Job in the designated namespace (defaulting to `"default"`), using `spec.reclamation.diskPressure.image` if provided, portable byte-size log truncation (`-size +<bytes>c`), `crictl` preflight checks with `--state=exited` pruning, and `TTLSecondsAfterFinished`/`ActiveDeadlineSeconds` bounds. Existing succeeded/failed reclamation Jobs are also cleaned up even after `DiskPressure` clears to prevent orphaned Jobs.
    - Emits node-level Kubernetes Events and updates Prometheus metrics tracking evaluations, compliance, quarantines, and reclamation jobs.
 4. **Read-Only Status Aggregation & Finalizer Cleanup (ClusterRuleReconciler)**:
    - Registers the `finalizer.kubeorthos.io/clusterrule-cleanup` finalizer on active `ClusterRule` resources.
