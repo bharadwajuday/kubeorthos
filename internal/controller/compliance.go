@@ -368,3 +368,84 @@ func reconcileReclamation(ctx context.Context, c client.Client, recorder events.
 
 	return nil
 }
+
+// cleanupRuleFromNode removes all compliance labels, custom labels, and quarantine claims
+// associated with a specific ClusterRule from a Node. It returns true if the Node was modified.
+func cleanupRuleFromNode(recorder events.EventRecorder, rule *auditv1alpha1.ClusterRule, node *corev1.Node) bool {
+	nodeUpdated := false
+
+	complianceLabelKey := constants.LabelCompliancePrefix + rule.Name
+	if node.Labels != nil {
+		if _, exists := node.Labels[complianceLabelKey]; exists {
+			delete(node.Labels, complianceLabelKey)
+			nodeUpdated = true
+		}
+	}
+
+	if reconcileLabeling(recorder, rule, node, false) {
+		nodeUpdated = true
+	}
+
+	ruleCopy := rule.DeepCopy()
+	ruleCopy.Spec.Action = auditv1alpha1.ActionAudit
+	if reconcileCordoning(recorder, ruleCopy, node, true) {
+		nodeUpdated = true
+	}
+
+	NodeQuarantineStatus.WithLabelValues(node.Name, rule.Name).Set(0)
+	return nodeUpdated
+}
+
+// cleanupOrphanedRuleState removes any stale compliance.kubeorthos.io/<rule> labels or
+// quarantine.kubeorthos.io/<rule> annotations whose ClusterRule no longer exists in activeRules.
+// If no quarantine claims remain on the node, it safely uncordons the node.
+func cleanupOrphanedRuleState(node *corev1.Node, activeRules map[string]struct{}) bool {
+	nodeUpdated := false
+
+	if node.Labels != nil {
+		for k := range node.Labels {
+			if ruleName, ok := strings.CutPrefix(k, constants.LabelCompliancePrefix); ok {
+				if _, active := activeRules[ruleName]; !active {
+					delete(node.Labels, k)
+					nodeUpdated = true
+				}
+			}
+		}
+	}
+
+	removedQuarantine := false
+	if node.Annotations != nil {
+		for k := range node.Annotations {
+			if ruleName, ok := strings.CutPrefix(k, constants.AnnotationQuarantinePrefix); ok {
+				if _, active := activeRules[ruleName]; !active {
+					delete(node.Annotations, k)
+					NodeQuarantineStatus.WithLabelValues(node.Name, ruleName).Set(0)
+					removedQuarantine = true
+					nodeUpdated = true
+				}
+			}
+		}
+
+		if removedQuarantine {
+			hasOtherQuarantines := false
+			for k, v := range node.Annotations {
+				if strings.HasPrefix(k, constants.AnnotationQuarantinePrefix) && v == constants.ValueTrue {
+					hasOtherQuarantines = true
+					break
+				}
+			}
+			if !hasOtherQuarantines {
+				if node.Spec.Unschedulable {
+					node.Spec.Unschedulable = false
+					nodeUpdated = true
+				}
+				if _, exists := node.Annotations[constants.AnnotationQuarantined]; exists {
+					delete(node.Annotations, constants.AnnotationQuarantined)
+					nodeUpdated = true
+				}
+			}
+		}
+	}
+
+	return nodeUpdated
+}

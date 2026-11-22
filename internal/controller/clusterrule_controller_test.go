@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -28,16 +29,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	auditv1alpha1 "kubeorthos/api/v1alpha1"
 	"kubeorthos/internal/constants"
 	"kubeorthos/internal/utils"
-
-	batchv1 "k8s.io/api/batch/v1"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-
-	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 var _ = Describe("ClusterRule Controller", func() {
@@ -61,11 +60,17 @@ var _ = Describe("ClusterRule Controller", func() {
 		})
 
 		AfterEach(func() {
-			// Cleanup the ClusterRule
-			resource := &auditv1alpha1.ClusterRule{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			if err == nil {
-				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			// Cleanup all ClusterRules (stripping finalizers if still present)
+			var rules auditv1alpha1.ClusterRuleList
+			Expect(k8sClient.List(ctx, &rules)).To(Succeed())
+			for i := range rules.Items {
+				r := &rules.Items[i]
+				if len(r.Finalizers) > 0 {
+					orig := r.DeepCopy()
+					r.Finalizers = nil
+					_ = k8sClient.Patch(ctx, r, client.MergeFrom(orig))
+				}
+				_ = k8sClient.Delete(ctx, r)
 			}
 
 			// Clean up nodes
@@ -382,11 +387,58 @@ var _ = Describe("ClusterRule Controller", func() {
 			Expect(cond.Message).To(Equal("2 node(s) are non-compliant"))
 		})
 
-		It("should actively add and remove compliance labels and custom labels on matching nodes", func() {
-			labelKey := "policy.kubeorthos.io/compliant"
-			labelVal := "true"
-			customKey := "environment"
-			customVal := "production"
+		It("should accurately populate status summary and nonCompliantNodes details without mutating nodes or creating jobs", func() {
+			// Create 3 nodes:
+			// - worker-compliant: compliant
+			// - worker-mismatch: non-compliant (kubelet version mismatch, already quarantined by NodeReconciler, experiencing DiskPressure)
+			// - cp-node: control plane node (excluded from total and matched)
+			node1 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "worker-compliant",
+					Labels: map[string]string{"kubernetes.io/os": "linux", "tier": "backend"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node1)).To(Succeed())
+			node1.Status = corev1.NodeStatus{
+				NodeInfo: corev1.NodeSystemInfo{
+					KubeletVersion: "v1.34.0",
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, node1)).To(Succeed())
+
+			node2 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "worker-mismatch",
+					Labels: map[string]string{"kubernetes.io/os": "linux", "tier": "backend"},
+					Annotations: map[string]string{
+						constants.AnnotationQuarantinePrefix + resourceName: constants.ValueTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node2)).To(Succeed())
+			node2.Status = corev1.NodeStatus{
+				NodeInfo: corev1.NodeSystemInfo{
+					KubeletVersion: "v1.32.0",
+				},
+				Conditions: []corev1.NodeCondition{
+					{Type: corev1.NodeDiskPressure, Status: corev1.ConditionTrue},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, node2)).To(Succeed())
+
+			cpNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "cp-node",
+					Labels: map[string]string{constants.LabelNodeRoleControlPlane: ""},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cpNode)).To(Succeed())
+			cpNode.Status = corev1.NodeStatus{
+				NodeInfo: corev1.NodeSystemInfo{
+					KubeletVersion: "v1.32.0",
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, cpNode)).To(Succeed())
 
 			rule := &auditv1alpha1.ClusterRule{
 				ObjectMeta: metav1.ObjectMeta{
@@ -394,52 +446,25 @@ var _ = Describe("ClusterRule Controller", func() {
 					Namespace: "default",
 				},
 				Spec: auditv1alpha1.ClusterRuleSpec{
-					Action: auditv1alpha1.ActionAudit,
+					Action: auditv1alpha1.ActionEnforce,
+					NodeSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"tier": "backend"},
+					},
 					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
 						KubeletVersion: "v1.34.0",
 					},
 					ComplianceLabel: &auditv1alpha1.ComplianceLabelSpec{
-						Key:   labelKey,
-						Value: labelVal,
+						Key:   "policy.kubeorthos.io/compliant",
+						Value: "true",
 					},
-					CustomLabels: map[string]string{
-						customKey: customVal,
+					Reclamation: &auditv1alpha1.ReclamationSpec{
+						DiskPressure: &auditv1alpha1.DiskPressureReclamation{
+							CleanImages: utils.BoolPtr(true),
+						},
 					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
-
-			// Node 1: Compliant node that is missing the labels (should be applied)
-			compliantNode := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "compliant-node-label",
-				},
-			}
-			Expect(k8sClient.Create(ctx, compliantNode)).To(Succeed())
-			compliantNode.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{
-					KubeletVersion: "v1.34.0",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, compliantNode)).To(Succeed())
-
-			// Node 2: Non-compliant node that has the labels (should be removed)
-			nonCompliantNode := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "non-compliant-node-label",
-					Labels: map[string]string{
-						labelKey:  labelVal,
-						customKey: customVal,
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, nonCompliantNode)).To(Succeed())
-			nonCompliantNode.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{
-					KubeletVersion: "v1.15.0-outdated",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, nonCompliantNode)).To(Succeed())
 
 			controllerReconciler := &ClusterRuleReconciler{
 				Client:   k8sClient,
@@ -452,84 +477,75 @@ var _ = Describe("ClusterRule Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify Node 1 now carries the compliance and custom labels
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "compliant-node-label"}, compliantNode)).To(Succeed())
-			Expect(compliantNode.Labels).To(HaveKeyWithValue(labelKey, labelVal))
-			Expect(compliantNode.Labels).To(HaveKeyWithValue(customKey, customVal))
+			// Fetch updated rule
+			updatedRule := &auditv1alpha1.ClusterRule{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updatedRule)).To(Succeed())
 
-			// Verify Node 2 has had the compliance and custom labels removed
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "non-compliant-node-label"}, nonCompliantNode)).To(Succeed())
-			Expect(nonCompliantNode.Labels).NotTo(HaveKey(labelKey))
-			Expect(nonCompliantNode.Labels).NotTo(HaveKey(customKey))
+			// Verify Summary counts
+			Expect(updatedRule.Status.Summary).NotTo(BeNil())
+			Expect(updatedRule.Status.Summary.TotalNodes).To(Equal(2))
+			Expect(updatedRule.Status.Summary.MatchedNodes).To(Equal(2))
+			Expect(updatedRule.Status.Summary.CompliantNodes).To(Equal(1))
+			Expect(updatedRule.Status.Summary.NonCompliantNodes).To(Equal(1))
+
+			// Verify NonCompliantNodes details
+			Expect(updatedRule.Status.NonCompliantNodes).To(HaveLen(1))
+			detail := updatedRule.Status.NonCompliantNodes[0]
+			Expect(detail.Name).To(Equal("worker-mismatch"))
+			Expect(detail.Quarantined).To(BeTrue())
+			Expect(detail.Reasons).To(ContainElement(ContainSubstring("KubeletVersion mismatch")))
+
+			// Verify ClusterRuleReconciler did NOT mutate nodes or create reclamation Jobs
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-compliant"}, node1)).To(Succeed())
+			Expect(node1.Labels).NotTo(HaveKey("policy.kubeorthos.io/compliant"))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-mismatch"}, node2)).To(Succeed())
+			Expect(node2.Spec.Unschedulable).To(BeFalse())
+
+			var jobs batchv1.JobList
+			Expect(k8sClient.List(ctx, &jobs)).To(Succeed())
+			Expect(jobs.Items).To(BeEmpty())
 		})
 
-		It("should cordon non-compliant worker nodes, skip control-plane nodes, and uncordon when compliant under ActionEnforce", func() {
-			enforceRuleName := "test-enforce-rule"
+		It("should add finalizer on reconcile and clean up node labels and quarantine claims upon deletion", func() {
 			rule := &auditv1alpha1.ClusterRule{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      enforceRuleName,
-					Namespace: "default",
+					Name: resourceName,
 				},
 				Spec: auditv1alpha1.ClusterRuleSpec{
 					Action: auditv1alpha1.ActionEnforce,
 					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
 						KubeletVersion: "v1.34.0",
 					},
+					ComplianceLabel: &auditv1alpha1.ComplianceLabelSpec{
+						Key:   "policy.kubeorthos.io/compliant",
+						Value: "true",
+					},
+					CustomLabels: map[string]string{
+						"environment": "production",
+					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
 
-			// Node 1: Non-compliant worker node (should be cordoned and annotated)
-			workerNonCompliant := &corev1.Node{
+			worker := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "worker-non-compliant",
-				},
-			}
-			Expect(k8sClient.Create(ctx, workerNonCompliant)).To(Succeed())
-			workerNonCompliant.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{
-					KubeletVersion: "v1.15.0-outdated",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, workerNonCompliant)).To(Succeed())
-
-			// Node 2: Non-compliant control plane node (should NOT be cordoned)
-			cpNonCompliant := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "cp-non-compliant",
+					Name: "worker-finalizer-cleanup",
 					Labels: map[string]string{
-						"node-role.kubernetes.io/control-plane": "",
+						constants.LabelCompliancePrefix + resourceName: "false",
+						"policy.kubeorthos.io/compliant":               "true",
+						"environment":                                  "production",
 					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, cpNonCompliant)).To(Succeed())
-			cpNonCompliant.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{
-					KubeletVersion: "v1.15.0-outdated",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, cpNonCompliant)).To(Succeed())
-
-			// Node 3: Compliant worker node that was previously quarantined (should be uncordoned and annotation removed)
-			workerCompliantQuarantined := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "worker-compliant-quarantined",
 					Annotations: map[string]string{
-						constants.AnnotationQuarantinePrefix + "test-enforce-rule": constants.ValueTrue,
-						constants.AnnotationQuarantined:                            constants.ValueTrue,
+						constants.AnnotationQuarantinePrefix + resourceName: constants.ValueTrue,
+						constants.AnnotationQuarantined:                     constants.ValueTrue,
 					},
 				},
 				Spec: corev1.NodeSpec{
 					Unschedulable: true,
 				},
 			}
-			Expect(k8sClient.Create(ctx, workerCompliantQuarantined)).To(Succeed())
-			workerCompliantQuarantined.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{
-					KubeletVersion: "v1.34.0",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, workerCompliantQuarantined)).To(Succeed())
+			Expect(k8sClient.Create(ctx, worker)).To(Succeed())
 
 			controllerReconciler := &ClusterRuleReconciler{
 				Client:   k8sClient,
@@ -537,34 +553,40 @@ var _ = Describe("ClusterRule Controller", func() {
 				Recorder: events.NewFakeRecorder(100),
 			}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: enforceRuleName, Namespace: "default"},
-			})
+			// 1. First reconcile registers the finalizer
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify Node 1: Non-compliant worker is now cordoned and has the quarantine annotation
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-non-compliant"}, workerNonCompliant)).To(Succeed())
-			Expect(workerNonCompliant.Spec.Unschedulable).To(BeTrue())
-			Expect(workerNonCompliant.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantined, "true"))
+			Expect(k8sClient.Get(ctx, typeNamespacedName, rule)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(rule, constants.ClusterRuleFinalizer)).To(BeTrue())
 
-			// Verify Node 2: Non-compliant control plane node is NOT cordoned
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cp-non-compliant"}, cpNonCompliant)).To(Succeed())
-			Expect(cpNonCompliant.Spec.Unschedulable).To(BeFalse())
+			// 2. Delete the ClusterRule -> DeletionTimestamp is set, object still exists due to finalizer
+			Expect(k8sClient.Delete(ctx, rule)).To(Succeed())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, rule)).To(Succeed())
+			Expect(rule.DeletionTimestamp.IsZero()).To(BeFalse())
 
-			// Verify Node 3: Compliant worker node has been uncordoned and quarantine annotation removed
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-compliant-quarantined"}, workerCompliantQuarantined)).To(Succeed())
-			Expect(workerCompliantQuarantined.Spec.Unschedulable).To(BeFalse())
-			Expect(workerCompliantQuarantined.Annotations).NotTo(HaveKey(constants.AnnotationQuarantined))
+			// 3. Reconcile deletion -> cleans up worker node and removes finalizer
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify ClusterRule is completely deleted
+			err = k8sClient.Get(ctx, typeNamespacedName, rule)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+			// Verify worker node was cleaned up and uncordoned
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-finalizer-cleanup"}, worker)).To(Succeed())
+			Expect(worker.Labels).NotTo(HaveKey(constants.LabelCompliancePrefix + resourceName))
+			Expect(worker.Labels).NotTo(HaveKey("policy.kubeorthos.io/compliant"))
+			Expect(worker.Labels).NotTo(HaveKey("environment"))
+			Expect(worker.Annotations).NotTo(HaveKey(constants.AnnotationQuarantinePrefix + resourceName))
+			Expect(worker.Annotations).NotTo(HaveKey(constants.AnnotationQuarantined))
+			Expect(worker.Spec.Unschedulable).To(BeFalse())
 		})
 
-		It("should uncordon worker nodes when a rule action transitions from Enforce to Audit", func() {
-			transitionRuleName := "test-transition-rule"
-
-			// 1. Start with ActionEnforce
+		It("should keep node cordoned upon ClusterRule deletion if another rule still holds a quarantine claim", func() {
 			rule := &auditv1alpha1.ClusterRule{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      transitionRuleName,
-					Namespace: "default",
+					Name: resourceName,
 				},
 				Spec: auditv1alpha1.ClusterRuleSpec{
 					Action: auditv1alpha1.ActionEnforce,
@@ -575,26 +597,24 @@ var _ = Describe("ClusterRule Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
 
-			// Previously quarantined worker node
-			quarantinedWorker := &corev1.Node{
+			worker := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "quarantined-worker-transition",
+					Name: "worker-shared-finalizer",
+					Labels: map[string]string{
+						constants.LabelCompliancePrefix + resourceName: "false",
+						constants.LabelCompliancePrefix + "other-rule": "false",
+					},
 					Annotations: map[string]string{
-						constants.AnnotationQuarantinePrefix + "test-transition-rule": constants.ValueTrue,
-						constants.AnnotationQuarantined:                               constants.ValueTrue,
+						constants.AnnotationQuarantinePrefix + resourceName: constants.ValueTrue,
+						constants.AnnotationQuarantinePrefix + "other-rule": constants.ValueTrue,
+						constants.AnnotationQuarantined:                     constants.ValueTrue,
 					},
 				},
 				Spec: corev1.NodeSpec{
 					Unschedulable: true,
 				},
 			}
-			Expect(k8sClient.Create(ctx, quarantinedWorker)).To(Succeed())
-			quarantinedWorker.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{
-					KubeletVersion: "v1.15.0-outdated", // still non-compliant
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, quarantinedWorker)).To(Succeed())
+			Expect(k8sClient.Create(ctx, worker)).To(Succeed())
 
 			controllerReconciler := &ClusterRuleReconciler{
 				Client:   k8sClient,
@@ -602,215 +622,29 @@ var _ = Describe("ClusterRule Controller", func() {
 				Recorder: events.NewFakeRecorder(100),
 			}
 
-			// Reconcile once in Enforce: Node should remain quarantined since it's still non-compliant
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: transitionRuleName, Namespace: "default"},
-			})
+			// Register finalizer, then delete and reconcile
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Delete(ctx, rule)).To(Succeed())
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "quarantined-worker-transition"}, quarantinedWorker)).To(Succeed())
-			Expect(quarantinedWorker.Spec.Unschedulable).To(BeTrue())
-			Expect(quarantinedWorker.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantined, "true"))
-
-			// 2. Change rule Action to Audit
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: transitionRuleName, Namespace: "default"}, rule)).To(Succeed())
-			rule.Spec.Action = auditv1alpha1.ActionAudit
-			Expect(k8sClient.Update(ctx, rule)).To(Succeed())
-
-			// Reconcile again: The node should now be actively uncordoned and quarantine annotation removed
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: transitionRuleName, Namespace: "default"},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "quarantined-worker-transition"}, quarantinedWorker)).To(Succeed())
-			Expect(quarantinedWorker.Spec.Unschedulable).To(BeFalse())
-			Expect(quarantinedWorker.Annotations).NotTo(HaveKey(constants.AnnotationQuarantined))
-		})
-
-		It("should trigger automated resource reclamation when node experiences DiskPressure", func() {
-			reclaimRuleName := "test-reclaim-rule"
-
-			rule := &auditv1alpha1.ClusterRule{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      reclaimRuleName,
-					Namespace: "default",
-				},
-				Spec: auditv1alpha1.ClusterRuleSpec{
-					Action: auditv1alpha1.ActionAudit,
-					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
-						KubeletVersion: "v1.34.0",
-					},
-					Reclamation: &auditv1alpha1.ReclamationSpec{
-						DiskPressure: &auditv1alpha1.DiskPressureReclamation{
-							CleanImages:     utils.BoolPtr(true),
-							CleanContainers: utils.BoolPtr(true),
-							CleanLogs:       utils.BoolPtr(true),
-							LogSizeLimit:    "100Mi",
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
-
-			// Node: Targeted worker node experiencing DiskPressure
-			pressuredNode := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "pressured-worker-node",
-				},
-			}
-			Expect(k8sClient.Create(ctx, pressuredNode)).To(Succeed())
-			pressuredNode.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{
-					KubeletVersion: "v1.34.0",
-				},
-				Conditions: []corev1.NodeCondition{
-					{
-						Type:   corev1.NodeDiskPressure,
-						Status: corev1.ConditionTrue,
-					},
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, pressuredNode)).To(Succeed())
-
-			controllerReconciler := &ClusterRuleReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
-			}
-
-			// 1. Reconcile: should spawn the Job
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: reclaimRuleName, Namespace: "default"},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Verify Job was created
-			job := &batchv1.Job{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-test-reclaim-rule-pressured-worker-node", Namespace: "default"}, job)).To(Succeed())
-			Expect(job.Spec.Template.Spec.NodeName).To(Equal("pressured-worker-node"))
-			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Privileged).To(BeNil())
-			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation).To(Equal(utils.BoolPtr(false)))
-			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
-			Expect(job.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities.Add).To(ContainElement(corev1.Capability("DAC_OVERRIDE")))
-
-			// 2. Mark Job as Succeeded and reconcile: should delete the Job
-			job.Status.Succeeded = 1
-			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
-
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: reclaimRuleName, Namespace: "default"},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Verify Job is deleted
-			Eventually(func(g Gomega) {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-test-reclaim-rule-pressured-worker-node", Namespace: "default"}, job)
-				g.Expect(apierrors.IsNotFound(err) || job.DeletionTimestamp != nil).To(BeTrue())
-			}, "10s").Should(Succeed())
-		})
-
-		It("should safely handle multiple overlapping ClusterRules under Scoped Quarantining", func() {
-			ruleAName := "test-rule-a"
-			ruleBName := "test-rule-b"
-
-			// Create Rule A (Enforce mode)
-			ruleA := &auditv1alpha1.ClusterRule{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      ruleAName,
-					Namespace: "default",
-				},
-				Spec: auditv1alpha1.ClusterRuleSpec{
-					Action: auditv1alpha1.ActionEnforce,
-					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
-						KubeletVersion: "v1.34.0",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, ruleA)).To(Succeed())
-
-			// Create Rule B (Enforce mode)
-			ruleB := &auditv1alpha1.ClusterRule{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      ruleBName,
-					Namespace: "default",
-				},
-				Spec: auditv1alpha1.ClusterRuleSpec{
-					Action: auditv1alpha1.ActionEnforce,
-					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
-						KubeletVersion: "v1.34.0",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, ruleB)).To(Succeed())
-
-			// Create worker node quarantined by BOTH Rule A and Rule B
-			nodeName := "worker-shared-quarantine"
-			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: nodeName,
-					Annotations: map[string]string{
-						constants.AnnotationQuarantinePrefix + ruleAName: "true",
-						constants.AnnotationQuarantinePrefix + ruleBName: "true",
-						constants.AnnotationQuarantined:                  "true",
-					},
-				},
-				Spec: corev1.NodeSpec{
-					Unschedulable: true,
-				},
-			}
-			Expect(k8sClient.Create(ctx, node)).To(Succeed())
-
-			// Node is actually compliant now
-			node.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{
-					KubeletVersion: "v1.34.0",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
-
-			controllerReconciler := &ClusterRuleReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
-			}
-
-			// 1. Reconcile with Rule A: should delete quarantine key A but LEAVE node cordoned because key B is still present!
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: ruleAName, Namespace: "default"},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
-			Expect(node.Spec.Unschedulable).To(BeTrue())                                                          // Still cordoned!
-			Expect(node.Annotations).NotTo(HaveKey(constants.AnnotationQuarantinePrefix + ruleAName))             // Rule A key is deleted
-			Expect(node.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantinePrefix+ruleBName, "true")) // Rule B key is still there
-			Expect(node.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantined, "true"))                // Global key still there
-
-			// Clean up Rule A to prevent interference in next blocks
-			Expect(k8sClient.Delete(ctx, ruleA)).To(Succeed())
-
-			// 2. Reconcile with Rule B: should delete quarantine key B. Since no other quarantine keys remain, it should safely uncordon!
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: ruleBName, Namespace: "default"},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
-			Expect(node.Spec.Unschedulable).To(BeFalse())                                             // Safely uncordoned!
-			Expect(node.Annotations).NotTo(HaveKey(constants.AnnotationQuarantinePrefix + ruleBName)) // Rule B key is deleted
-			Expect(node.Annotations).NotTo(HaveKey(constants.AnnotationQuarantined))                  // Global key deleted
-
-			// Clean up Rule B
-			Expect(k8sClient.Delete(ctx, ruleB)).To(Succeed())
+			// Verify only this rule's label & quarantine claim were removed; node stays cordoned for other-rule
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-shared-finalizer"}, worker)).To(Succeed())
+			Expect(worker.Labels).NotTo(HaveKey(constants.LabelCompliancePrefix + resourceName))
+			Expect(worker.Labels).To(HaveKeyWithValue(constants.LabelCompliancePrefix+"other-rule", "false"))
+			Expect(worker.Annotations).NotTo(HaveKey(constants.AnnotationQuarantinePrefix + resourceName))
+			Expect(worker.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantinePrefix+"other-rule", constants.ValueTrue))
+			Expect(worker.Annotations).To(HaveKeyWithValue(constants.AnnotationQuarantined, constants.ValueTrue))
+			Expect(worker.Spec.Unschedulable).To(BeTrue())
 		})
 	})
 
-	Describe("Node Event Predicate Filter", func() {
-		var pred nodePredicate
+	Describe("Rule Watch Node Event Predicate Filter", func() {
+		var pred ruleWatchNodePredicate
 
 		BeforeEach(func() {
-			pred = nodePredicate{}
+			pred = ruleWatchNodePredicate{}
 		})
 
 		It("should approve Create and Delete events only if they carry compliance or quarantine labels/annotations", func() {
@@ -920,310 +754,6 @@ var _ = Describe("ClusterRule Controller", func() {
 				"quarantine.kubeorthos.io/rule-b": "true",
 			}
 			Expect(pred.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode3})).To(BeTrue())
-		})
-	})
-
-	Describe("ClusterRule Metrics Verification", func() {
-		const metricsRuleName = "metrics-rule"
-		ctx := context.Background()
-		typeNamespacedName := types.NamespacedName{
-			Name:      metricsRuleName,
-			Namespace: "default",
-		}
-
-		BeforeEach(func() {
-			// Cleanup
-			var nodes corev1.NodeList
-			Expect(k8sClient.List(ctx, &nodes)).To(Succeed())
-			for _, node := range nodes.Items {
-				_ = k8sClient.Delete(ctx, &node)
-			}
-		})
-
-		AfterEach(func() {
-			rule := &auditv1alpha1.ClusterRule{}
-			err := k8sClient.Get(ctx, typeNamespacedName, rule)
-			if err == nil {
-				Expect(k8sClient.Delete(ctx, rule)).To(Succeed())
-			}
-
-			var nodes corev1.NodeList
-			Expect(k8sClient.List(ctx, &nodes)).To(Succeed())
-			for _, node := range nodes.Items {
-				_ = k8sClient.Delete(ctx, &node)
-			}
-		})
-
-		It("should increment nodes evaluated, compliant and non-compliant counters correctly", func() {
-			rule := &auditv1alpha1.ClusterRule{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      metricsRuleName,
-					Namespace: "default",
-				},
-				Spec: auditv1alpha1.ClusterRuleSpec{
-					Action: auditv1alpha1.ActionAudit,
-					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
-						KubeletVersion: "v1.34.0",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
-
-			// Node 1: Compliant
-			node1 := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: "metrics-node-compliant"},
-			}
-			Expect(k8sClient.Create(ctx, node1)).To(Succeed())
-			node1.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.34.0"},
-			}
-			Expect(k8sClient.Status().Update(ctx, node1)).To(Succeed())
-
-			// Node 2: Non-compliant
-			node2 := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: "metrics-node-non-compliant"},
-			}
-			Expect(k8sClient.Create(ctx, node2)).To(Succeed())
-			node2.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.15.0-outdated"},
-			}
-			Expect(k8sClient.Status().Update(ctx, node2)).To(Succeed())
-
-			controllerReconciler := &ClusterRuleReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
-			}
-
-			// Get initial values
-			initEvaluated := testutil.ToFloat64(NodesEvaluatedTotal.WithLabelValues(metricsRuleName))
-			initCompliant := testutil.ToFloat64(NodesCompliantTotal.WithLabelValues(metricsRuleName))
-			initNonCompliant := testutil.ToFloat64(NodesNonCompliantTotal.WithLabelValues(metricsRuleName))
-
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Verify metrics incremented correctly
-			Expect(testutil.ToFloat64(NodesEvaluatedTotal.WithLabelValues(metricsRuleName))).To(Equal(initEvaluated + 2))
-			Expect(testutil.ToFloat64(NodesCompliantTotal.WithLabelValues(metricsRuleName))).To(Equal(initCompliant + 1))
-			Expect(testutil.ToFloat64(NodesNonCompliantTotal.WithLabelValues(metricsRuleName))).To(Equal(initNonCompliant + 1))
-		})
-
-		It("should update NodeQuarantineStatus gauge based on quarantine status", func() {
-			rule := &auditv1alpha1.ClusterRule{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      metricsRuleName,
-					Namespace: "default",
-				},
-				Spec: auditv1alpha1.ClusterRuleSpec{
-					Action: auditv1alpha1.ActionEnforce,
-					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
-						KubeletVersion: "v1.34.0",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
-
-			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: "metrics-quarantine-node"},
-			}
-			Expect(k8sClient.Create(ctx, node)).To(Succeed())
-			node.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.15.0-outdated"}, // Non-compliant worker -> Cordoned/Quarantined
-			}
-			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
-
-			controllerReconciler := &ClusterRuleReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
-			}
-
-			// Reconcile non-compliant under Enforce action
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Check quarantine gauge is set to 1
-			Expect(testutil.ToFloat64(NodeQuarantineStatus.WithLabelValues("metrics-quarantine-node", metricsRuleName))).To(Equal(float64(1)))
-
-			// Now make it compliant
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "metrics-quarantine-node"}, node)).To(Succeed())
-			node.Status.NodeInfo.KubeletVersion = "v1.34.0"
-			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
-
-			// Reconcile compliant
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Check quarantine gauge is set to 0
-			Expect(testutil.ToFloat64(NodeQuarantineStatus.WithLabelValues("metrics-quarantine-node", metricsRuleName))).To(Equal(float64(0)))
-		})
-
-		It("should increment ReclamationJobsTriggeredTotal and ReclamationJobFailuresTotal counters correctly", func() {
-			rule := &auditv1alpha1.ClusterRule{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      metricsRuleName,
-					Namespace: "default",
-				},
-				Spec: auditv1alpha1.ClusterRuleSpec{
-					Action: auditv1alpha1.ActionAudit,
-					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
-						KubeletVersion: "v1.34.0",
-					},
-					Reclamation: &auditv1alpha1.ReclamationSpec{
-						DiskPressure: &auditv1alpha1.DiskPressureReclamation{
-							CleanImages: utils.BoolPtr(true),
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
-
-			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: "metrics-reclaim-node"},
-			}
-			Expect(k8sClient.Create(ctx, node)).To(Succeed())
-			node.Status = corev1.NodeStatus{
-				NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.34.0"},
-				Conditions: []corev1.NodeCondition{
-					{
-						Type:   corev1.NodeDiskPressure,
-						Status: corev1.ConditionTrue,
-					},
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
-
-			controllerReconciler := &ClusterRuleReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
-			}
-
-			initTriggered := testutil.ToFloat64(ReclamationJobsTriggeredTotal.WithLabelValues("metrics-reclaim-node", "DiskPressure"))
-			initFailures := testutil.ToFloat64(ReclamationJobFailuresTotal.WithLabelValues("metrics-reclaim-node"))
-
-			// Reconcile: should trigger Job
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Check reclamation triggered metric
-			Expect(testutil.ToFloat64(ReclamationJobsTriggeredTotal.WithLabelValues("metrics-reclaim-node", "DiskPressure"))).To(Equal(initTriggered + 1))
-
-			// Verify the Job is created
-			job := &batchv1.Job{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "reclaim-metrics-rule-metrics-reclaim-node", Namespace: "default"}, job)).To(Succeed())
-
-			// Mark Job as failed and reconcile to verify failures counter
-			job.Status.Failed = 1
-			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
-
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Check reclamation failures metric
-			Expect(testutil.ToFloat64(ReclamationJobFailuresTotal.WithLabelValues("metrics-reclaim-node"))).To(Equal(initFailures + 1))
-		})
-
-		It("should accurately populate status summary and nonCompliantNodes details", func() {
-			// Create 3 nodes:
-			// - worker-1: compliant
-			// - worker-2: non-compliant (kubelet version mismatch)
-			// - control-plane: control plane node (should be excluded from total and matched)
-			node1 := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "worker-compliant",
-					Labels: map[string]string{"kubernetes.io/os": "linux", "tier": "backend"},
-				},
-				Status: corev1.NodeStatus{
-					NodeInfo: corev1.NodeSystemInfo{
-						KubeletVersion: "v1.34.0",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, node1)).To(Succeed())
-
-			node2 := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "worker-mismatch",
-					Labels: map[string]string{"kubernetes.io/os": "linux", "tier": "backend"},
-				},
-				Status: corev1.NodeStatus{
-					NodeInfo: corev1.NodeSystemInfo{
-						KubeletVersion: "v1.32.0",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, node2)).To(Succeed())
-
-			cpNode := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "cp-node",
-					Labels: map[string]string{constants.LabelNodeRoleControlPlane: ""},
-				},
-				Status: corev1.NodeStatus{
-					NodeInfo: corev1.NodeSystemInfo{
-						KubeletVersion: "v1.32.0",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, cpNode)).To(Succeed())
-
-			rule := &auditv1alpha1.ClusterRule{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      metricsRuleName,
-					Namespace: "default",
-				},
-				Spec: auditv1alpha1.ClusterRuleSpec{
-					Action: auditv1alpha1.ActionEnforce,
-					NodeSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"tier": "backend"},
-					},
-					ExpectedNodeConfig: auditv1alpha1.ExpectedNodeConfig{
-						KubeletVersion: "v1.34.0",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
-
-			controllerReconciler := &ClusterRuleReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
-			}
-
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Fetch updated rule
-			updatedRule := &auditv1alpha1.ClusterRule{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, updatedRule)).To(Succeed())
-
-			// Verify Summary counts
-			Expect(updatedRule.Status.Summary).NotTo(BeNil())
-			Expect(updatedRule.Status.Summary.TotalNodes).To(Equal(2))
-			Expect(updatedRule.Status.Summary.MatchedNodes).To(Equal(2))
-			Expect(updatedRule.Status.Summary.CompliantNodes).To(Equal(1))
-			Expect(updatedRule.Status.Summary.NonCompliantNodes).To(Equal(1))
-
-			// Verify NonCompliantNodes details
-			Expect(updatedRule.Status.NonCompliantNodes).To(HaveLen(1))
-			detail := updatedRule.Status.NonCompliantNodes[0]
-			Expect(detail.Name).To(Equal("worker-mismatch"))
-			Expect(detail.Quarantined).To(BeTrue())
-			Expect(detail.Reasons).To(ContainElement(ContainSubstring("KubeletVersion mismatch")))
 		})
 	})
 })

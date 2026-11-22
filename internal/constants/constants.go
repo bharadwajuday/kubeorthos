@@ -56,6 +56,9 @@ const (
 
 	// LabelCompliancePrefix is the prefix used for tracking compliance labels per rule (e.g. compliance.kubeorthos.io/<rule>)
 	LabelCompliancePrefix = "compliance.kubeorthos.io/"
+
+	// ClusterRuleFinalizer ensures quarantined/labeled nodes are cleaned up before a ClusterRule is deleted
+	ClusterRuleFinalizer = "finalizer.kubeorthos.io/clusterrule-cleanup"
 )
 
 // Event Reasons used when emitting Kubernetes Events
