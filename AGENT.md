@@ -22,8 +22,8 @@ The application is structured following standard Go Kubernetes Operator patterns
 - **Responsibility**: The Reconcile loops and compliance logic.
 - **Key Concepts**:
   - **NodeReconciler**: Reconciles `corev1.Node` resources using `nodeReconcilePredicate` (approving `Create` and genuine `Spec`, `Labels`, quarantine annotation, `NodeInfo`, `Allocatable`, and condition status updates while ignoring heartbeat timestamps). It exclusively owns all node mutations: stamping compliance tracking labels (`compliance.kubeorthos.io/<rule-name>: "true"|"false"`), applying/removing compliance and custom labels, active enforcement (cordoning/quarantining), disk-pressure reclamation Jobs, node-level Kubernetes Events, and Prometheus evaluation/quarantine/reclamation metrics. This provides a scalable, node-centric $O(R)$ cache-lookup architecture per node event.
-  - **ClusterRuleReconciler**: Read-only with respect to Nodes and Jobs. Reconciles `ClusterRule` resources to aggregate `ClusterRule.Status` (`Summary`, `NonCompliantNodes`, and `Conditions`). It watches `Nodes` via `ruleWatchNodePredicate`, a prefix-based, label-selective watch that *only* enqueues rule reconciles when compliance tracking labels (`compliance.kubeorthos.io/`) or quarantine annotations (`quarantine.kubeorthos.io/`) change, preventing global fan-out thundering herds on node status updates.
-  - **compliance.go**: Houses shared, package-level helper functions for node compliance auditing (`auditNodeCompliance`), cordoning (`reconcileCordoning`), labeling (`reconcileLabeling`), and reclamation (`reconcileReclamation`).
+  - **ClusterRuleReconciler**: Read-only with respect to Nodes and Jobs during active reconciliation (performing Node cleanup only during finalizer deletion). Reconciles `ClusterRule` resources to aggregate `ClusterRule.Status` (`Summary`, `NonCompliantNodes`, and `Conditions`). It watches `Nodes` via `ruleWatchNodePredicate`, a prefix-based, label-selective watch that *only* enqueues rule reconciles when compliance tracking labels (`compliance.kubeorthos.io/`) or quarantine annotations (`quarantine.kubeorthos.io/`) change, preventing global fan-out thundering herds on node status updates.
+  - **compliance.go**: Houses shared, package-level helper functions for node compliance auditing (`auditNodeCompliance`), cordoning (`reconcileCordoning`), labeling (`reconcileLabeling`), reclamation (`reconcileReclamation`), and rule/orphan cleanup (`cleanupRuleFromNode`, `cleanupOrphanedRuleState`).
   - Applies strategic JSON patching (`client.MergeFrom`) to prevent lock conflicts. Direct `pods` RBAC permissions are omitted from the manager role to enforce strict Least Privilege.
 
 ### 4. `internal/constants`
@@ -34,11 +34,7 @@ The application is structured following standard Go Kubernetes Operator patterns
 - **Responsibility**: Shared Helper Utilities.
 - **Key Concepts**: Contains helper modules like `jobs.go` which constructs template-based ephemeral cleanup/reclamation Jobs configured with a hardened security context (`Privileged: false`, no privilege escalation, dropped capabilities, and `DAC_OVERRIDE` capability for secure log truncation), configurable container image (`spec.reclamation.diskPressure.image`), `TTLSecondsAfterFinished` / `ActiveDeadlineSeconds` bounds, a `crictl` preflight check with `--state=exited` container pruning, and `ParseLogSizeLimitBytes` to convert Kubernetes size thresholds into portable `-size +<bytes>c` arguments. `utils.go` exports common pointer references (`BoolPtr`, `Int32Ptr`, `Int64Ptr`) used in API payloads.
 
-### 6. `internal/validator`
-- **Responsibility**: The core rule engine.
-- **Key Concepts**: Evaluates the cluster state against the rules defined in the CRDs. It identifies deviations, misconfigurations, and non-compliant resources safely.
-
-### 7. `internal/webhook`
+### 6. `internal/webhook`
 - **Responsibility**: Admission controllers.
 - **Key Concepts**: Contains the validating admission webhook (`clusterrule_webhook.go`) that intercepts `ClusterRule` creation and update requests. It enforces syntactic and semantic constraints, such as rejecting invalid/unparseable node selectors (via `metav1.LabelSelectorAsSelector` verification) and enforcing that `expectedNodeConfig` is never empty.
 

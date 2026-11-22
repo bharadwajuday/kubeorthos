@@ -11,7 +11,7 @@ It helps you validate, enforce, and maintain the desired state and best practice
 - **Scoped Multi-Rule Quarantining & Deletion Finalizer**: Safely manages concurrent policies. Non-compliant nodes are quarantined using namespaced annotations (`quarantine.kubeorthos.io/<rule-name>`), and uncordoned only when *all* policies release their quarantine claims. A `ClusterRule` finalizer (`finalizer.kubeorthos.io/clusterrule-cleanup`) and an orphaned-rule sweep in `NodeReconciler` guarantee that deleting a rule cleanly removes its labels, releases its quarantine claims, and uncordons nodes when no other rules remain.
 - **API Server & Event Filtering (Heartbeat Predicates)**: Drops reconciler resource usage by >99% on idle clusters by ignoring frequent, timestamp-only Node status updates (e.g., last heartbeat) and only triggering on genuine changes to specs, key metadata, allocatable capacity, or condition statuses.
 - **Client-Side Cache Scoping**: Restricts the informer cache for Nodes to only watch and store nodes matching the label `kubernetes.io/os: linux` to significantly reduce memory footprint and API server watch traffic on large, hybrid-OS clusters.
-- **Conflict-Resilient strategic JSON Patching**: Employs transactional client JSON strategic patching (`client.MergeFrom`) rather than full `Update` objects, ensuring 100% thread-safety and zero Optimistic Locking conflicts (`409 Conflict`) even when multiple rules reconcile in parallel.
+- **Conflict-Resilient Strategic JSON Patching**: Employs transactional client JSON strategic patching (`client.MergeFrom`) rather than full `Update` objects, ensuring 100% thread-safety and zero Optimistic Locking conflicts (`409 Conflict`) even when multiple rules reconcile in parallel.
 - **Detailed Reconciliation Observability & Status Breakdown**: Outputs structured trace logs specifying exactly which rule expectations are evaluated for each node. In addition, `ClusterRule.Status` directly captures an aggregate `summary` (`totalNodes`, `matchedNodes`, `compliantNodes`, `nonCompliantNodes`) and a capped `nonCompliantNodes` list detailing node names, granular mismatch reasons, and quarantine status.
 - **Instant CLI Visibility (Kubectl Printer Columns)**: Custom printer columns expose `ACTION`, `STATUS`, `MATCHED`, `COMPLIANT`, and `NON-COMPLIANT` counts directly in `kubectl get clusterrules`.
 - **Validating Admission Webhook**: Performs real-time syntactic and semantic validation for `ClusterRule` resources at the API admission level. It uses `metav1.LabelSelectorAsSelector` to validate and reject unparseable/invalid node selectors, and enforces that `expectedNodeConfig` is never empty.
@@ -19,7 +19,7 @@ It helps you validate, enforce, and maintain the desired state and best practice
 ## Getting Started
 
 ### Prerequisites
-- Go 1.26 or later
+- Go 1.25.3 or later
 - Access to a Kubernetes v1.20+ cluster (e.g., kind, minikube)
 - kubectl
 
@@ -106,14 +106,16 @@ KubeOrthos includes a Validating Admission Webhook that intercepts `ClusterRule`
 
 ## Project Structure
 
-- `cmd/main.go`: Entry point for the Operator manager.
-- `api/`: Custom Resource Definitions (CRDs) for configuring policies.
-- `internal/controller/`: Reconcile loops to monitor and enforce configuration correctness.
-  - `compliance.go`: Shared package-level helper functions for node compliance auditing and enforcement.
+- `cmd/main.go`: Entry point for the Operator manager (registers controllers, webhooks, and client-side Node cache scoping).
+- `api/v1alpha1/`: Custom Resource Definitions (CRDs) for configuring `ClusterRule` policies.
+- `internal/constants/`: Shared constants for conditions, labels, annotations, finalizers, events, and defaults.
+- `internal/controller/`: Reconcile loops (`NodeReconciler`, `ClusterRuleReconciler`) and shared compliance/enforcement/cleanup helpers (`compliance.go`).
+- `internal/utils/`: Shared utilities, including reclamation script construction, log-size parsing, and hardened Job templates (`jobs.go`, `utils.go`).
+- `internal/webhook/v1alpha1/`: Validating Admission Webhook for `ClusterRule` resources.
 
 ## AI Skills Files
 
-This project utilizes specific "Skill Files" (e.g., `SKILL_UPDATE_CRD.md` and `AGENT.md`) that contain predefined rules and workflows for AI coding assistants to follow. When using AI agents on this repository, you can instruct them to read these files for context on best practices and required steps.
+This project utilizes specific guide and skill files (`AGENTS.md`, `AGENT.md`, and `SKILL_UPDATE_CRD.md`) that contain predefined rules and workflows for AI coding assistants to follow. When using AI agents on this repository, you can instruct them to read these files for context on best practices and required steps.
 
 ## Contributing
 
@@ -121,4 +123,4 @@ We welcome contributions! Please see the contributing guidelines (coming soon) f
 
 ## License
 
-*(License information will be added here.)*
+This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
